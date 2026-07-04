@@ -1,0 +1,68 @@
+{
+  "name": "reazonspeech",
+  "version": "1.0.0",
+  "description": "ローカルで動作する日本語文字起こしアプリ（ReazonSpeech / sherpa-onnx）",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test:cli": "node scripts/test-pipeline.js",
+    "fetch:ffmpeg": "node scripts/fetch-ffmpeg.js",
+    "dist:mac": "electron-builder --mac --arm64",
+    "predist:win": "node scripts/fetch-ffmpeg.js",
+    "dist:win": "electron-builder --win --x64",
+    "predist:win:signed": "node scripts/fetch-ffmpeg.js",
+    "dist:win:signed": "electron-builder --win --x64 --config electron-builder.signed.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "dependencies": {
+    "ffmpeg-static": "^5.3.0",
+    "sherpa-onnx-node": "^1.13.3"
+  },
+  "optionalDependencies": {
+    "sherpa-onnx-darwin-arm64": "^1.13.3",
+    "sherpa-onnx-darwin-x64": "^1.13.3",
+    "sherpa-onnx-win-x64": "^1.13.3"
+  },
+  "devDependencies": {
+    "electron": "^42.5.1",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "jp.reazonspeech.localapp",
+    "productName": "モコシ",
+    "copyright": "© 2026 モコシ project",
+    "directories": { "output": "release" },
+    "files": [
+      "**/*",
+      "!models/**",
+      "!samples/**",
+      "!scripts/**",
+      "!release/**",
+      "!vendor/**",
+      "!node_modules/ffmpeg-static/ffmpeg.exe",
+      "!**/*.map",
+      "!**/.git/**"
+    ],
+    "extraResources": [
+      { "from": "vendor/ffmpeg", "to": "ffmpeg" }
+    ],
+    "asarUnpack": [
+      "**/node_modules/ffmpeg-static/**",
+      "**/node_modules/sherpa-onnx-node/**",
+      "**/node_modules/sherpa-onnx-darwin-*/**",
+      "**/node_modules/sherpa-onnx-win-*/**"
+    ],
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["arm64"] }],
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.png"
+    },
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "build/icon.png"
+    }
+  }
+}

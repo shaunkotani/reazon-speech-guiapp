@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' app-media:;" />
+  <title>モコシ</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <div class="header-main">
+      <h1>モコシ</h1>
+      <p class="sub">日本語音声・動画をローカルで文字起こし（オフライン）</p>
+    </div>
+    <button id="about-btn" class="about-btn" title="このアプリ・ライセンスについて">ⓘ 情報</button>
+  </header>
+
+  <!-- モデル未取得バナー -->
+  <section id="model-banner" class="banner hidden">
+    <div class="banner-text">
+      <strong>初回セットアップ</strong>: 音声認識モデル（約150MB）が必要です。
+      <span id="model-progress-text"></span>
+    </div>
+    <button id="download-btn">モデルをダウンロード</button>
+    <div class="progress hidden" id="model-progress"><div class="bar"></div></div>
+  </section>
+
+  <!-- ドロップゾーン -->
+  <section id="dropzone" class="dropzone">
+    <p>ここに音声/動画ファイルをドラッグ＆ドロップ</p>
+    <p class="or">または</p>
+    <button id="pick-btn">ファイルを選択</button>
+    <p class="hint">対応: wav / mp3 / m4a / flac / mp4 / mov など</p>
+  </section>
+
+  <!-- 認識設定（高精度モード・用語辞書） -->
+  <section id="hotwords" class="hotwords">
+    <div class="accuracy-row">
+      <label class="acc-toggle">
+        <input type="checkbox" id="high-accuracy" />
+        高精度モード
+      </label>
+      <span class="acc-note">認識精度が上がりますが、処理速度は遅くなります</span>
+      <span id="accuracy-hint" class="acc-hint hidden">辞書使用中は、オフでも高精度で動作します</span>
+    </div>
+    <details>
+      <summary>
+        用語辞書（ホットワード）
+        <span id="hotwords-summary" class="hw-summary"></span>
+      </summary>
+      <div class="hw-body">
+        <p class="hint">
+          固有名詞・専門用語を1行に1語ずつ登録すると、その語を優先して認識します（例: 社名・人名・略語）。
+          登録すると復号が高精度モード（beam search）に切り替わります。
+        </p>
+        <textarea id="hotwords-text" rows="6" placeholder="ReazonSpeech&#10;文字起こし&#10;議事録"></textarea>
+        <div class="hw-controls">
+          <label class="hw-enable"><input type="checkbox" id="hotwords-enabled" checked /> 辞書を使う</label>
+          <label class="hw-score">
+            効き具合 <span id="hotwords-score-val">2.0</span>
+            <input type="range" id="hotwords-score" min="0.5" max="5" step="0.5" value="2" />
+          </label>
+          <span class="spacer"></span>
+          <span id="hotwords-status" class="hw-status"></span>
+          <button id="hotwords-save">保存</button>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ジョブ一覧 -->
+  <section id="jobs"></section>
+
+  <template id="job-template">
+    <div class="job">
+      <div class="job-head">
+        <span class="job-name"></span>
+        <span class="job-status"></span>
+      </div>
+
+      <!-- 取込後の設定・プレビュー -->
+      <div class="job-setup">
+        <div class="preview-row">
+          <span class="plabel">元音声<br><small>先頭10秒</small></span>
+          <audio class="audio-original" controls preload="metadata"></audio>
+          <span class="orig-status preview-status"></span>
+        </div>
+        <div class="denoise-row">
+          <span class="plabel">ノイズ除去</span>
+          <div class="denoise-seg" role="radiogroup" aria-label="ノイズ除去の強さ">
+            <button type="button" class="seg-opt" data-value="0">なし</button>
+            <button type="button" class="seg-opt" data-value="0.5">弱</button>
+            <button type="button" class="seg-opt is-active" data-value="0.8">中</button>
+            <button type="button" class="seg-opt" data-value="1">強</button>
+          </div>
+          <button class="preview-btn">除去後をプレビュー</button>
+          <span class="preview-status"></span>
+        </div>
+        <div class="preview-row denoised-row hidden">
+          <span class="plabel">除去後<br><small>先頭10秒</small></span>
+          <audio class="audio-denoised" controls preload="metadata"></audio>
+        </div>
+        <div class="setup-actions">
+          <button class="start-btn">この設定で文字起こし</button>
+        </div>
+      </div>
+
+      <div class="progress-wrap hidden">
+        <div class="progress"><div class="bar"></div></div>
+        <span class="eta"></span>
+        <button class="cancel-btn">中止</button>
+      </div>
+      <div class="job-result hidden">
+        <div class="toolbar">
+          <span class="meta"></span>
+          <span class="spacer"></span>
+          <button class="tag-btn">話者でタグ付け</button>
+          <button data-fmt="txt">TXT</button>
+          <button data-fmt="srt">SRT</button>
+          <button data-fmt="vtt">VTT</button>
+          <button data-fmt="json">JSON</button>
+          <button class="copy-btn">コピー</button>
+        </div>
+        <div class="embed-progress hidden">
+          <span class="embed-label">声紋を解析中…</span>
+          <div class="progress"><div class="bar"></div></div>
+          <span class="embed-eta"></span>
+        </div>
+        <div class="diar-edit hidden">
+          <div class="diar-tools">
+            <span class="diar-hint">各区間を ▶ で試聴し、確かな区間に話者を割り当て（手本）→</span>
+            <button class="reassign-btn">手本で話者識別</button>
+            <span class="reassign-status"></span>
+          </div>
+        </div>
+        <div class="segments"></div>
+      </div>
+    </div>
+  </template>
+
+  <!-- このアプリについて / ライセンス -->
+  <div id="about-modal" class="modal hidden">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>このアプリについて</h2>
+        <button class="modal-close" data-close aria-label="閉じる">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="about-main">
+          <p class="about-app"><strong>モコシ</strong><span id="about-version" class="about-ver"></span></p>
+          <p class="about-desc">ReazonSpeech（k2）を sherpa-onnx で動かす、完全ローカル・オフラインの日本語文字起こしアプリ。本体コードは Apache-2.0 で提供されます。</p>
+          <p class="about-privacy">🔒 音声データ・文字起こし結果を外部へ送信しません。通信が発生するのはモデルの初回ダウンロード時のみです。</p>
+
+          <h3>オープンソース ライセンス</h3>
+          <ul class="oss-list">
+            <li><span class="oss-name">本アプリ本体</span><span class="oss-lic">Apache-2.0</span><span class="oss-acts"><button class="lic-btn" data-license="apache-2.0">全文</button></span></li>
+            <li><span class="oss-name">Electron / Chromium / Node.js</span><span class="oss-lic">MIT ほか</span><span class="oss-acts"><button class="lic-btn" data-chromium>Chromium一覧</button></span></li>
+            <li><span class="oss-name">FFmpeg（音声デコード）</span><span class="oss-lic">LGPL v3</span><span class="oss-acts"><button class="lic-btn" data-license="lgpl-3.0">LGPL</button><button class="lic-btn" data-license="gpl-3.0">GPL</button><button class="lic-btn" data-url="https://github.com/FFmpeg/FFmpeg">ソース</button></span></li>
+            <li><span class="oss-name">sherpa-onnx</span><span class="oss-lic">Apache-2.0</span><span class="oss-acts"><button class="lic-btn" data-license="apache-2.0">全文</button><button class="lic-btn" data-url="https://github.com/k2-fsa/sherpa-onnx">配布元</button></span></li>
+            <li><span class="oss-name">ReazonSpeech k2-v2（認識モデル）</span><span class="oss-lic">Apache-2.0</span><span class="oss-acts"><button class="lic-btn" data-url="https://huggingface.co/reazon-research/reazonspeech-k2-v2">配布元</button></span></li>
+            <li><span class="oss-name">Silero VAD（発話検出）</span><span class="oss-lic">MIT</span><span class="oss-acts"><button class="lic-btn" data-license="mit">全文</button></span></li>
+            <li><span class="oss-name">GTCRN（ノイズ除去モデル）</span><span class="oss-lic">上流準拠</span><span class="oss-acts"><button class="lic-btn" data-url="https://github.com/Xiaobin-Rong/gtcrn">配布元</button></span></li>
+            <li><span class="oss-name">WeSpeaker ResNet34（話者埋め込み）</span><span class="oss-lic">上流準拠</span><span class="oss-acts"><button class="lic-btn" data-url="https://github.com/wenet-e2e/wespeaker">配布元</button></span></li>
+          </ul>
+          <button class="lic-btn wide" data-license="notice">帰属表示（NOTICE）全文を表示</button>
+        </div>
+        <div class="about-license hidden">
+          <button class="lic-back">← 一覧に戻る</button>
+          <pre class="lic-text"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+node_modules/
+dist/
+release/
+out/
+# build/ は中身を無視しつつ、アプリアイコン資材だけコミットする
+build/*
+!build/icon.png
+!build/icon-source.png
+
+# 大きいモデルファイル（初回起動時DL or ビルド時同梱）
+models/
+# テスト用音声
+samples/
+
+# ffmpeg バイナリ（100MB超でGitHub上限を超える）。scripts/fetch-ffmpeg.js でビルド時に取得。
+# vendor 配下の説明テキスト(ffmpeg-build-info.txt 等)は追跡する。
+vendor/ffmpeg/**/ffmpeg
+vendor/ffmpeg/**/ffmpeg.exe
+
+# OS / editor
+.DS_Store
+*.log

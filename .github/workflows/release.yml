@@ -1,0 +1,31 @@
+name: Release (Windows)
+
+# タグ v* を push すると Windows インストーラをビルドし、GitHub Release に添付する。
+# 手動実行(workflow_dispatch)も可能。署名は行わない（未署名配布）。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # GITHUB_TOKEN で Release を作成/更新するために必要
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      # dist:win の pre スクリプトで LGPL 版 ffmpeg を取得 → パッケージ → Release へ publish
+      # （electron-builder は git remote から owner/repo を推定。GH_TOKEN で Release を作成）
+      - name: Build & publish installer
+        run: npm run dist:win -- --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
