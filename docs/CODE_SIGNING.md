@@ -1,5 +1,11 @@
 # コード署名（Windows / Azure Trusted Signing）
 
+> ⚠️ **非推奨（2026-07 に方針転換）**: Windows 配布は **Microsoft Store（AppX/MSIX）に切り替え**ました。
+> Store 経由なら Microsoft が自動署名するため、この Azure Trusted Signing の手順は**もう使いません**。
+> 新しい配布方針は [MICROSOFT_STORE.md](MICROSOFT_STORE.md) を参照。
+> 本ファイルは、GitHub Releases（NSIS `.exe`）を自前署名で直接配布する選択肢を残す場合の記録として保持しています。
+> Store 一本化するなら `electron-builder.signed.js` / `dist:win:signed` / 本ファイルは撤去して構いません。
+
 Windows 配布物（`モコシ Setup x.y.z.exe` と中の `モコシ.exe`）を Azure Trusted Signing で
 署名する手順。署名しないと Windows SmartScreen の警告が出ます。
 

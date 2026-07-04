@@ -6,8 +6,9 @@
 ## 1. これは何か / ゴール
 - ReazonSpeech の **k2 モデル**を **sherpa-onnx** で動かす、**完全ローカル・オフライン**の日本語文字起こし **Electron デスクトップアプリ**。
 - ゴール: **Python も ReazonSpeech も入れていない端末で、誰でもダブルクリックで使える**こと。
-- 対象OS: **macOS(Apple Silicon)＋Windows**（現状ビルド実績は mac のみ。Win は要 Windows 実機ビルド）。
+- 対象OS: **macOS(Apple Silicon)＋Windows**。**Windows は CI（`release.yml`）でビルド→GitHub Releases 配布中。現行 v1.3.0**。mac は dmg のローカルビルドのみ。
 - ライセンス: アプリ Apache-2.0 / モデル・sherpa-onnx も Apache-2.0。
+- **配布方針（2026-07 更新）**: Windows は **Microsoft Store（AppX/MSIX）へ移行予定**（署名を Store に任せる）。→ 第6.5章・`docs/MICROSOFT_STORE.md`。
 
 ## 2. 技術スタック
 | 層 | 採用 |
@@ -74,6 +75,16 @@ release/               ビルド成果物（.dmg 等）
    - 辞書とは独立したスイッチ。UI: 認識設定セクション上部の「高精度モード」チェックボックス（`#high-accuracy`）＋速度トレードオフの注記。変更で即 `accuracy:set` 保存＋`destroyPool()`。設定は `settings.highAccuracy`。
    - `core.createRecognizer` の `beamSearch` フラグで実現（`useBeam = useHotwords || beamSearch`）。**チェックボックスは常に操作可**（ユーザー自身の希望値 `userHighAccuracy` を表示）。辞書ON時は beam が OR で強制されるため「オフでも高精度で動作します」の注記のみ表示（UI: `syncAccuracyUI()`、`savedDictActive`）。以前は辞書ON時にチェック固定＋無効化していたが「触れない」と分かりにくいため独立操作に変更。
    - 検証: `beamSearch:true`（辞書なし）で `文字を誇示→文字起し` の矯正を確認（beam 単体効果）。
+9. **テキスト出力に時刻プレフィックス（v1.1.0）**: TXT 書き出しとクリップボードコピーの各行頭に `[HH:MM:SS --> HH:MM:SS]` を付与（`shared/export.js` の `timePrefix`/`formatClock`、renderer `plainTextWithSpeakers`）。SRT/VTT/JSON は元々時刻ありで不変。
+10. **データ初期化 / 完全アンインストール（v1.2.0）**: About モーダルの「メンテナンス」セクション。
+    - `app:wipeData` = モデル・設定・辞書・一時ファイル削除（本体は残す）。`app:uninstall` = 上記＋終了後に userData 全削除＋NSIS アンインストーラを `/S` 起動（Windows）。
+    - **削除前に必ず `destroyPool()`**（モデル .onnx のファイルロック解放）。`findWindowsUninstaller()` が `Uninstall *.exe` を探し、無ければ（dev/zip/**AppX**）「完全アンインストール」ボタンは自動 disabled。
+    - ⚠️ **Store(AppX) では NSIS 経路は無効**（自動 disabled）。data 初期化のみ有効。→ MICROSOFT_STORE.md §0-2。
+11. **自動アップデート（v1.3.0・electron-updater + GitHub Releases）**: ハイブリッド運用。
+    - 起動1.5秒後に静かにチェック → 更新ありで上部バナー通知 → ユーザーが DL（進捗%）→「再起動して更新」（`quitAndInstall`）。About に手動「更新を確認」。
+    - `autoDownload=false` / `autoInstallOnAppQuit=true`。`updaterEnabled()=app.isPackaged` でガード（IPC: `update:check`/`download`/`install`、イベント `update:status`/`update:progress`）。
+    - `build.publish` に GitHub provider を明示。**フィード `latest.yml` は CI の `--publish always` が生成**。
+    - ⚠️ **前提: リポジトリが public であること**（private だと updater が latest.yml を取得できない）。**Store(AppX) では無効化が必要**（`!process.windowsStore` を追加）→ MICROSOFT_STORE.md §0-1。
 
 ## 6. ビルド / 実行 / 検証
 ```bash
@@ -95,8 +106,9 @@ node scripts/test-hotwords.js samples/natural.wav "文字起こし,議事録" 3.
   - **Windows(x64) は配置済み**（BtbN win64-lgpl）。**mac(arm64) は未配置＝現状 GPL フォールバック**。配布前に `vendor/ffmpeg/darwin-arm64/ffmpeg` に LGPL mac ビルドを置くこと。
   - `vendor/ffmpeg/**` は `asarUnpack`（実行ファイルは asar 内から起動不可のため）。
 - **アプリ内ライセンス画面**: ヘッダ「ⓘ 情報」→ `#about-modal`。IPC は `app:info` / `license:read`（`licenses/` をホワイトリスト読み）/ `license:openChromium`（同梱 `LICENSES.chromium.html` を既定アプリで開く）/ `shell:openExternal`。全文テキストは `licenses/{apache-2.0,lgpl-3.0,gpl-3.0,mit}.txt` と `licenses/NOTICE.txt`。
-- **コード署名（Windows / Azure Trusted Signing）**: `npm run dist:win:signed` で署名（electron-builder 26 の `win.azureSignOptions` ネイティブ対応）。設定は `electron-builder.signed.js`（package.json の build を継承し azureSignOptions を追加、値は環境変数から）。未署名の `dist:win` はローカル検証用に残置。手順・必要な環境変数・GitHub Actions 例は `docs/CODE_SIGNING.md`。
-- **未確認/要対応**: (1) mac LGPL ffmpeg の配置と mac 実機ビルド。(2) GTCRN / wespeaker(VoxCeleb) モデルの再配布ライセンスの最終確認（NOTICE に「上流準拠」で記載中）。(3) Azure Trusted Signing のアカウント作成・アイデンティティ検証・サービスプリンシパルのロール付与（承認に数日）。(4) mac 署名/公証（Developer ID＋notarize）は別途。
+- **コード署名 / Windows 配布 — 方針転換（2026-07）**: Azure Trusted Signing は**やめて Microsoft Store（AppX/MSIX）配布に切り替え**。Store 経由なら Microsoft が自動署名し SmartScreen 警告も出ない。**計画・手順・既存機能への影響は `docs/MICROSOFT_STORE.md`（必読）**。旧 Azure 手順（`electron-builder.signed.js` / `dist:win:signed` / `docs/CODE_SIGNING.md`）は**非推奨**として残置（Store 一本化時に撤去可）。
+  - ⚠️ **Store 化は自動アップデート(v1.3.0)と完全アンインストール(v1.2.0)に影響する**（Store が更新・アンインストールを担うため）。詳細と必要なコード変更（`updaterEnabled()` に `!process.windowsStore` を追加 等）は MICROSOFT_STORE.md §0 を参照。
+- **未確認/要対応**: (1) mac LGPL ffmpeg の配置と mac 実機ビルド。(2) GTCRN / wespeaker(VoxCeleb) モデルの再配布ライセンスの最終確認（NOTICE に「上流準拠」で記載中）。(3) **Microsoft Store 対応**（Partner Center 登録・Identity取得・`appx`ターゲット追加・updater/uninstall の Store 分岐）→ `docs/MICROSOFT_STORE.md` の TODO。(4) mac 署名/公証（Developer ID＋notarize）は別途。
 
 ## 7. モデルURL（modelManager 参照）
 - k2: `https://huggingface.co/reazon-research/reazonspeech-k2-v2/resolve/main/{encoder,decoder,joiner}-epoch-99-avg-1.int8.onnx, tokens.txt`（**fp32版**は `.int8` を外したファイル名で同ディレクトリに存在）
@@ -112,7 +124,10 @@ node scripts/test-hotwords.js samples/natural.wav "文字起こし,議事録" 3.
 - **D. 音量正規化**（未着手・ffmpeg loudnorm/dynaudnorm）… 小さい/ムラのある音声に有効。デコード段に追加。
 - **F. nemo（619M・最高精度）を sherpa で動かせるか調査**（未着手）… 当たれば最大のジャンプだが不確実。
 
-**次アクション候補**: (1) 用語辞書を実機GUIで通し検証（保存→文字起こしで反映されるか）。(2) hotwordsScore の既定値（現状2.0）を実運用で調整。(3) 余力あれば D（音量正規化）。
+**次アクション候補**:
+- **(最優先) Microsoft Store 対応** → `docs/MICROSOFT_STORE.md` の TODO（Partner Center 登録・`appx` 追加・updater/uninstall の Store 分岐）。方針転換で決定済み。
+- (1) 用語辞書を実機GUIで通し検証（保存→文字起こしで反映されるか）。(2) hotwordsScore の既定値（現状2.0）を実運用で調整。(3) 余力あれば D（音量正規化）。
+- 自動アップデート(v1.3.0)の実地確認: **リポジトリを public 化**した上で、旧バージョン→新バージョンの更新検知・DL・再起動適用を実機で確認。
 
 ### 併せて質問されていた「どこまで聞き取るか」パラメータ（既存の感度ノブ）
 `core.createVad` / `createRecognizer` にある:

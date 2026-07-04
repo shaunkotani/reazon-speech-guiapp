@@ -13,8 +13,10 @@
 - **高精度モード**: beam search 復号で認識精度を底上げ（処理速度はやや低下）。辞書とは独立に ON/OFF 可能
 - **用語辞書（ホットワード）**: 固有名詞・専門用語を登録すると優先認識（内部で高精度モードを自動有効化）
 - 進捗バーに**推定残り時間**を表示
-- TXT / SRT / VTT / JSON でエクスポート
-- 推論は CPU のみ・ネットワーク不要（モデル初回取得時のみ通信）
+- TXT / SRT / VTT / JSON でエクスポート（TXT/コピーは各行に `[HH:MM:SS --> HH:MM:SS]` の時刻付き）
+- **自動アップデート**（GitHub Releases 経由・起動時に確認しバナー通知 → DL → 再起動で更新）
+- **メンテナンス**（アプリデータの初期化 / 完全アンインストール）を「ⓘ 情報」画面から実行
+- 推論は CPU のみ・ネットワーク不要（モデル初回取得時・更新確認時のみ通信）
 
 ## 構成
 
@@ -75,9 +77,14 @@ npm run dist:win          # Windows(x64) .exe  未署名
 - **自動(CI)**: タグ `v*` を push すると [.github/workflows/release.yml](.github/workflows/release.yml)
   が Windows でビルドし、Release に添付します（`package.json` の `build.publish` で GitHub 指定）。
 
-> 未署名のため、利用者は初回起動時に Windows SmartScreen の警告が出ます
-> （「詳細情報」→「実行」で起動可）。コード署名を行う場合は
-> [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) を参照（任意）。
+> 現在の未署名 `.exe` は、利用者の初回起動時に Windows SmartScreen の警告が出ます
+> （「詳細情報」→「実行」で起動可）。
+>
+> **配布方針（2026-07 更新）**: Windows は **Microsoft Store（AppX/MSIX）配布へ移行予定**です。
+> Store 経由なら Microsoft が自動署名し、警告なし・自動更新（Store 管理）になります。
+> 計画・手順・既存機能（自動更新/アンインストール）への影響は
+> [docs/MICROSOFT_STORE.md](docs/MICROSOFT_STORE.md) を参照。
+> 旧 Azure Trusted Signing による自前署名（[docs/CODE_SIGNING.md](docs/CODE_SIGNING.md)）は**非推奨**です。
 
 > ネイティブ依存（sherpa-onnx-node のプラットフォーム別 .node）は各 OS 用バイナリが
 > 必要なため、**配布ビルドは対象 OS 上（または CI のマトリクス）で実行**します。
