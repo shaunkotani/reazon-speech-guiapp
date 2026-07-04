@@ -4,6 +4,7 @@ const os = require('os');
 const { fork, spawn } = require('child_process');
 const { app, BrowserWindow, ipcMain, dialog, protocol, net, shell } = require('electron');
 
+const { autoUpdater } = require('electron-updater');
 const modelManager = require('./modelManager');
 const exporters = require('../shared/export');
 const { assignByReferences, UNKNOWN_THRESHOLD } = require('../shared/cluster');
@@ -449,6 +450,62 @@ ipcMain.handle('app:uninstall', async () => {
   return { ok: true, platform: process.platform };
 });
 
+// ==== 自動アップデート（electron-updater + GitHub Releases） ====
+// ハイブリッド運用: 起動時に静かにチェックし、見つかったらUIで通知。
+// ダウンロードと再起動はユーザーが選ぶ（autoDownload=false）。
+autoUpdater.autoDownload = false;
+autoUpdater.autoInstallOnAppQuit = true; // 未インストールの更新は終了時に自動適用
+
+// renderer が生きていれば更新イベントを転送する。
+function sendUpdate(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, payload);
+  }
+}
+
+autoUpdater.on('checking-for-update', () => sendUpdate('update:status', { state: 'checking' }));
+autoUpdater.on('update-available', (info) =>
+  sendUpdate('update:status', { state: 'available', version: info.version }));
+autoUpdater.on('update-not-available', (info) =>
+  sendUpdate('update:status', { state: 'none', version: info.version }));
+autoUpdater.on('download-progress', (p) =>
+  sendUpdate('update:progress', { percent: p.percent, transferred: p.transferred, total: p.total }));
+autoUpdater.on('update-downloaded', (info) =>
+  sendUpdate('update:status', { state: 'downloaded', version: info.version }));
+autoUpdater.on('error', (err) =>
+  sendUpdate('update:status', { state: 'error', message: String((err && err.message) || err) }));
+
+// パッケージ済みでのみ動作（dev/zip では app-update.yml が無く例外になる）。
+const updaterEnabled = () => app.isPackaged;
+
+ipcMain.handle('update:check', async () => {
+  if (!updaterEnabled()) return { ok: false, reason: 'disabled' };
+  const r = await autoUpdater.checkForUpdates();
+  return { ok: true, version: r && r.updateInfo ? r.updateInfo.version : null };
+});
+
+ipcMain.handle('update:download', async () => {
+  if (!updaterEnabled()) return { ok: false, reason: 'disabled' };
+  await autoUpdater.downloadUpdate();
+  return { ok: true };
+});
+
+ipcMain.handle('update:install', () => {
+  if (!updaterEnabled()) return { ok: false, reason: 'disabled' };
+  destroyPool(); // ワーカーを止めてからインストーラへ
+  // isSilent=false（インストーラUIを表示）, isForceRunAfter=true（更新後に再起動）
+  setImmediate(() => autoUpdater.quitAndInstall(false, true));
+  return { ok: true };
+});
+
+// 起動時の静かなチェック（結果は update:status で renderer に届く）。
+function checkForUpdatesOnStartup() {
+  if (!updaterEnabled()) return;
+  autoUpdater.checkForUpdates().catch((e) => {
+    sendUpdate('update:status', { state: 'error', message: String((e && e.message) || e) });
+  });
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 980,
@@ -476,6 +533,8 @@ app.whenReady().then(() => {
     return net.fetch('file://' + filePath, { headers: request.headers });
   });
   createWindow();
+  // 起動直後に静かに更新チェック（UIが受け取れるよう少し遅らせる）
+  mainWindow.webContents.once('did-finish-load', () => setTimeout(checkForUpdatesOnStartup, 1500));
 });
 app.on('before-quit', () => {
   destroyPool();

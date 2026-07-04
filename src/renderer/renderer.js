@@ -661,4 +661,89 @@ function onJobError(jobId, err) {
   });
 })();
 
+// ---- アップデート（electron-updater。ハイブリッド運用） ----
+(() => {
+  const banner = $('#update-banner');
+  const bannerText = $('#update-banner-text');
+  const dlBtn = $('#update-download-btn');
+  const installBtn = $('#update-install-btn');
+  const dismissBtn = $('#update-dismiss-btn');
+  const bannerProgress = $('#update-progress');
+  const checkBtn = $('#check-update-btn');
+  const modalStatus = $('#update-modal-status');
+
+  let latestVersion = '';
+
+  function setModal(text) { if (modalStatus) modalStatus.textContent = text; }
+  function showBanner() { banner.classList.remove('hidden'); }
+
+  window.api.onUpdateStatus((p) => {
+    switch (p.state) {
+      case 'checking':
+        setModal('確認中…');
+        break;
+      case 'available':
+        latestVersion = p.version;
+        bannerText.textContent = `新しいバージョン v${p.version} が利用可能です。`;
+        dlBtn.classList.remove('hidden');
+        dlBtn.disabled = false;
+        dlBtn.textContent = 'ダウンロード';
+        installBtn.classList.add('hidden');
+        showBanner();
+        setModal(`v${p.version} が利用可能です`);
+        break;
+      case 'none':
+        setModal(`最新版です（v${p.version}）`);
+        break;
+      case 'downloaded':
+        bannerText.textContent = `v${p.version} の準備ができました。再起動して更新します。`;
+        bannerProgress.classList.add('hidden');
+        dlBtn.classList.add('hidden');
+        installBtn.classList.remove('hidden');
+        showBanner();
+        setModal('ダウンロード完了。再起動で更新できます');
+        break;
+      case 'error':
+        setModal(`更新の確認に失敗: ${p.message}`);
+        break;
+      default:
+        break;
+    }
+  });
+
+  window.api.onUpdateProgress((p) => {
+    const pct = Math.round(p.percent || 0);
+    bannerProgress.classList.remove('hidden');
+    bannerProgress.querySelector('.bar').style.width = `${pct}%`;
+    dlBtn.disabled = true;
+    dlBtn.textContent = `ダウンロード中… ${pct}%`;
+  });
+
+  dlBtn.addEventListener('click', async () => {
+    dlBtn.disabled = true;
+    dlBtn.textContent = 'ダウンロード開始…';
+    try { await window.api.downloadUpdate(); }
+    catch (e) { setModal(`ダウンロード失敗: ${e.message}`); dlBtn.disabled = false; dlBtn.textContent = 'ダウンロード'; }
+  });
+
+  installBtn.addEventListener('click', () => {
+    window.api.installUpdate();
+  });
+
+  dismissBtn.addEventListener('click', () => banner.classList.add('hidden'));
+
+  checkBtn.addEventListener('click', async () => {
+    setModal('確認中…');
+    try {
+      const r = await window.api.checkUpdate();
+      if (r && r.ok === false) {
+        setModal('この版では自動更新を利用できません（開発版 / zip 版）。');
+      }
+      // 見つかった場合は update:status イベント側で banner/status を更新
+    } catch (e) {
+      setModal(`確認に失敗: ${e.message}`);
+    }
+  });
+})();
+
 refreshModelStatus();

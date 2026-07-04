@@ -46,6 +46,13 @@ contextBridge.exposeInMainWorld('api', {
   // エクスポート
   saveExport: (result, format) => ipcRenderer.invoke('export:save', { result, format }),
 
+  // アップデート（electron-updater）
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  onUpdateStatus: (cb) => ipcRenderer.on('update:status', (_e, p) => cb(p)),
+  onUpdateProgress: (cb) => ipcRenderer.on('update:progress', (_e, p) => cb(p)),
+
   // メンテナンス（データ初期化 / 完全アンインストール）
   dataInfo: () => ipcRenderer.invoke('app:dataInfo'),
   wipeData: () => ipcRenderer.invoke('app:wipeData'),

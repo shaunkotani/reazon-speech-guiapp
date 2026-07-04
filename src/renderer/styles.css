@@ -59,6 +59,12 @@ header .sub { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
 .lic-btn:hover { background: #e0e7ff; }
 .lic-btn.wide { width: 100%; padding: 8px; font-size: 12px; }
 
+.update-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.update-status { font-size: 12px; color: var(--muted); }
+.update-banner { background: #ecfdf5; border-color: #a7f3d0; }
+.update-banner button.ghost { background: transparent; color: var(--muted); }
+.update-banner button.ghost:hover { background: rgba(0,0,0,0.05); }
+
 .maint-note { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
 .maint-note #maint-size { color: var(--text); font-weight: 600; }
 .maint-actions { display: flex; gap: 8px; flex-wrap: wrap; }

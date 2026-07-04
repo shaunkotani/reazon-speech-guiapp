@@ -25,6 +25,17 @@
     <div class="progress hidden" id="model-progress"><div class="bar"></div></div>
   </section>
 
+  <!-- アップデート通知バナー（起動時に更新が見つかった時だけ表示） -->
+  <section id="update-banner" class="banner update-banner hidden">
+    <div class="banner-text">
+      <strong>アップデート</strong>: <span id="update-banner-text"></span>
+    </div>
+    <button id="update-download-btn">ダウンロード</button>
+    <button id="update-install-btn" class="hidden">再起動して更新</button>
+    <button id="update-dismiss-btn" class="ghost">後で</button>
+    <div class="progress hidden" id="update-progress"><div class="bar"></div></div>
+  </section>
+
   <!-- ドロップゾーン -->
   <section id="dropzone" class="dropzone">
     <p>ここに音声/動画ファイルをドラッグ＆ドロップ</p>
@@ -164,6 +175,12 @@
             <li><span class="oss-name">WeSpeaker ResNet34（話者埋め込み）</span><span class="oss-lic">上流準拠</span><span class="oss-acts"><button class="lic-btn" data-url="https://github.com/wenet-e2e/wespeaker">配布元</button></span></li>
           </ul>
           <button class="lic-btn wide" data-license="notice">帰属表示（NOTICE）全文を表示</button>
+
+          <h3>アップデート</h3>
+          <div class="update-row">
+            <button class="maint-btn" id="check-update-btn">更新を確認</button>
+            <span class="update-status" id="update-modal-status"></span>
+          </div>
 
           <h3>メンテナンス</h3>
           <p class="maint-note">保存データ（モデル・設定・辞書など）の容量: <span id="maint-size">…</span></p>
