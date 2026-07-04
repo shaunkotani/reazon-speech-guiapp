@@ -512,10 +512,20 @@ async function doReassign(jobId) {
 function exportPayload(job) {
   return { ...job.result, speakerNames: { ...job.names } };
 }
+// 秒 -> "HH:MM:SS"（コピー用の時刻プレフィックス。export.js の formatClock と揃える）
+function fmtClock(sec) {
+  const total = Math.floor(sec);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(h)}:${p(m)}:${p(s)}`;
+}
 function plainTextWithSpeakers(job) {
   return job.result.segments.map((s) => {
+    const ts = `[${fmtClock(s.start)} --> ${fmtClock(s.end)}] `;
     const n = job.tagging ? speakerLabel(job, s.speaker) : '';
-    return n ? `${n}: ${s.text}` : s.text;
+    return ts + (n ? `${n}: ${s.text}` : s.text);
   }).join('\n');
 }
 

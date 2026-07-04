@@ -13,6 +13,20 @@ function formatTime(sec, sep = ',') {
   return `${pad2(h)}:${pad2(m)}:${pad2(s)}${sep}${pad3(ms)}`;
 }
 
+/** 秒 -> "HH:MM:SS"（プレーンテキストの時刻プレフィックス用、ミリ秒なし） */
+function formatClock(sec) {
+  const total = Math.floor(sec);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
+}
+
+/** 区間の時刻プレフィックス "[HH:MM:SS --> HH:MM:SS] "。 */
+function timePrefix(s) {
+  return `[${formatClock(s.start)} --> ${formatClock(s.end)}] `;
+}
+
 /** 話者名を返す（名前指定があればそれ、無ければ 話者N、不明は 話者不明）。 */
 function speakerName(spk, names) {
   if (spk == null) return '';
@@ -27,7 +41,7 @@ function speakerPrefix(s, names) {
 }
 
 function toPlainText(segments, names) {
-  return segments.map((s) => speakerPrefix(s, names) + s.text).join('\n');
+  return segments.map((s) => timePrefix(s) + speakerPrefix(s, names) + s.text).join('\n');
 }
 
 function toSRT(segments, names) {
@@ -54,4 +68,4 @@ const EXPORTERS = {
   json: { ext: 'json', mime: 'application/json', build: (r) => toJSON(r) },
 };
 
-module.exports = { formatTime, toPlainText, toSRT, toVTT, toJSON, EXPORTERS };
+module.exports = { formatTime, formatClock, timePrefix, toPlainText, toSRT, toVTT, toJSON, EXPORTERS };
