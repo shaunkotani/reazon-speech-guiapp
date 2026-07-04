@@ -563,7 +563,75 @@ function onJobError(jobId, err) {
         versionLoaded = true;
       } catch (_) { /* 情報取得失敗は無視 */ }
     }
+    refreshMaint();
   }
+
+  // ---- メンテナンス（データ初期化 / 完全アンインストール） ----
+  const maintSize = $('#maint-size');
+  const maintStatus = $('#maint-status');
+  const resetBtn = $('#reset-data-btn');
+  const uninstallBtn = $('#uninstall-btn');
+
+  function fmtBytes(n) {
+    if (!n) return '0 B';
+    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+    return `${(n / Math.pow(1024, i)).toFixed(i ? 1 : 0)} ${u[i]}`;
+  }
+
+  async function refreshMaint() {
+    try {
+      const info = await window.api.dataInfo();
+      maintSize.textContent = fmtBytes(info.bytes);
+      resetBtn.disabled = false;
+      if (info.canUninstall) {
+        uninstallBtn.disabled = false;
+        uninstallBtn.title = '';
+      } else {
+        uninstallBtn.disabled = true;
+        uninstallBtn.title = 'アンインストーラが見つからないため無効です（開発実行中など）';
+      }
+    } catch (_) {
+      maintSize.textContent = '不明';
+    }
+  }
+
+  resetBtn.addEventListener('click', async () => {
+    if (!confirm(
+      'モデル・設定・用語辞書・一時ファイルをすべて削除します。\n'
+      + 'アプリ本体は残り、次回の文字起こし時にモデルの再ダウンロードが必要になります。\n\n'
+      + '実行しますか？（元に戻せません）'
+    )) return;
+    resetBtn.disabled = true; uninstallBtn.disabled = true;
+    maintStatus.textContent = '削除中…';
+    try {
+      await window.api.wipeData();
+      maintStatus.textContent = '削除しました。次回起動時にモデルの再取得が必要です。';
+      modelReady = false;
+      refreshModelStatus();
+    } catch (e) {
+      maintStatus.textContent = `失敗: ${e.message}`;
+    } finally {
+      refreshMaint();
+    }
+  });
+
+  uninstallBtn.addEventListener('click', async () => {
+    if (!confirm(
+      '【完全にアンインストール】\n'
+      + 'アプリ本体とすべてのデータ（モデル・設定・辞書）を削除し、アプリを終了します。\n\n'
+      + '本当に実行しますか？'
+    )) return;
+    if (!confirm('この操作は元に戻せません。最終確認：完全にアンインストールしますか？')) return;
+    uninstallBtn.disabled = true; resetBtn.disabled = true;
+    maintStatus.textContent = 'アンインストールしています。まもなくアプリが終了します…';
+    try {
+      await window.api.uninstall();
+    } catch (e) {
+      maintStatus.textContent = `失敗: ${e.message}`;
+      refreshMaint();
+    }
+  });
   function closeModal() { modal.classList.add('hidden'); }
 
   openBtn.addEventListener('click', openModal);

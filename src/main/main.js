@@ -1,7 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { fork } = require('child_process');
+const { fork, spawn } = require('child_process');
 const { app, BrowserWindow, ipcMain, dialog, protocol, net, shell } = require('electron');
 
 const modelManager = require('./modelManager');
@@ -362,6 +362,91 @@ ipcMain.handle('export:save', async (event, { result, format }) => {
   if (res.canceled) return { saved: false };
   fs.writeFileSync(res.filePath, exp.build(result), 'utf8');
   return { saved: true, path: res.filePath };
+});
+
+// ==== メンテナンス（データ初期化 / 完全アンインストール） ====
+
+// ディレクトリ配下の総バイト数（存在しなければ 0）。
+function dirSize(p) {
+  let entries;
+  try { entries = fs.readdirSync(p, { withFileTypes: true }); } catch (_) { return 0; }
+  let total = 0;
+  for (const e of entries) {
+    const full = path.join(p, e.name);
+    if (e.isDirectory()) total += dirSize(full);
+    else { try { total += fs.statSync(full).size; } catch (_) { /* ignore */ } }
+  }
+  return total;
+}
+
+// アプリが生成した既知データ（モデル・辞書・設定）と一時ファイルを削除する。
+// Chromium キャッシュ等は起動中ロックされるため触らない（完全削除は quit 後に行う）。
+function removeKnownData() {
+  const ud = app.getPath('userData');
+  for (const rel of ['models', 'hotwords.txt', 'settings.json']) {
+    try { fs.rmSync(path.join(ud, rel), { recursive: true, force: true }); } catch (_) { /* ignore */ }
+  }
+  try { fs.rmSync(previewDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }
+}
+
+// NSIS が設置するアンインストーラ（"Uninstall <productName>.exe"）を探す。
+// dev 実行（electron .）では見つからず null を返す。
+function findWindowsUninstaller() {
+  if (process.platform !== 'win32') return null;
+  const dir = path.dirname(app.getPath('exe'));
+  try {
+    const entry = fs.readdirSync(dir).find((f) => /^Uninstall .*\.exe$/i.test(f));
+    if (entry) return path.join(dir, entry);
+  } catch (_) { /* ignore */ }
+  return null;
+}
+
+// アプリ終了後に userData 全体を消し、NSIS アンインストーラをサイレント起動する
+// 使い捨て PowerShell を detached で起動する。実行中はロックされる Chromium
+// キャッシュも、プロセス終了を待ってから消すことで確実に削除できる。
+function scheduleWindowsUninstall() {
+  const uninstaller = findWindowsUninstaller();
+  const ud = app.getPath('userData').replace(/'/g, "''");
+  const unin = uninstaller ? uninstaller.replace(/'/g, "''") : '';
+  const script = [
+    'Start-Sleep -Milliseconds 1500',
+    `try { Remove-Item -LiteralPath '${ud}' -Recurse -Force -ErrorAction SilentlyContinue } catch {}`,
+    unin ? `if (Test-Path -LiteralPath '${unin}') { Start-Process -FilePath '${unin}' -ArgumentList '/S' }` : '',
+  ].join('\n');
+  const scriptPath = path.join(os.tmpdir(), `reazonspeech-uninstall-${Date.now()}.ps1`);
+  fs.writeFileSync(scriptPath, script, 'utf8');
+  const child = spawn(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath],
+    { detached: true, stdio: 'ignore' },
+  );
+  child.unref();
+}
+
+// 削除対象の情報（サイズ・アンインストール可否）を返す。
+ipcMain.handle('app:dataInfo', () => ({
+  userDataPath: app.getPath('userData'),
+  bytes: dirSize(app.getPath('userData')) + dirSize(previewDir),
+  hasModels: modelManager.isComplete(userDataModelsDir()),
+  canUninstall: !!findWindowsUninstaller(),
+}));
+
+// データ初期化：モデル・設定・辞書・一時ファイルを削除（アプリ本体は残す）。
+ipcMain.handle('app:wipeData', async () => {
+  destroyPool(); // モデル .onnx のロックを解放
+  await new Promise((r) => setTimeout(r, 250)); // ワーカー終了とロック解放を待つ
+  removeKnownData();
+  return { ok: true };
+});
+
+// 完全アンインストール：既知データを消し、quit 後に残りと本体を除去して終了する。
+ipcMain.handle('app:uninstall', async () => {
+  destroyPool();
+  await new Promise((r) => setTimeout(r, 250));
+  removeKnownData();
+  if (process.platform === 'win32') scheduleWindowsUninstall();
+  setTimeout(() => app.quit(), 200);
+  return { ok: true, platform: process.platform };
 });
 
 function createWindow() {

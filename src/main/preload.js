@@ -46,6 +46,11 @@ contextBridge.exposeInMainWorld('api', {
   // エクスポート
   saveExport: (result, format) => ipcRenderer.invoke('export:save', { result, format }),
 
+  // メンテナンス（データ初期化 / 完全アンインストール）
+  dataInfo: () => ipcRenderer.invoke('app:dataInfo'),
+  wipeData: () => ipcRenderer.invoke('app:wipeData'),
+  uninstall: () => ipcRenderer.invoke('app:uninstall'),
+
   // ライセンス / バージョン情報（About 画面）
   appInfo: () => ipcRenderer.invoke('app:info'),
   readLicense: (id) => ipcRenderer.invoke('license:read', id),
