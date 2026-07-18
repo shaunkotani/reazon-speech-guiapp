@@ -25,7 +25,8 @@ contextBridge.exposeInMainWorld('api', {
   pathForFile: (file) => webUtils.getPathForFile(file),
   mediaUrl,
 
-  // 文字起こし（opts: { denoiseStrength:0..1, diarize:bool, numSpeakers:int }）
+  // 文字起こし（opts: { denoiseStrength:0..1, diarize:bool, numSpeakers:int,
+  //   vad:{ preset, threshold, minSilenceDuration, maxSpeechDuration } }）
   transcribe: (filePath, jobId, opts) =>
     ipcRenderer.invoke('transcribe:file', filePath, jobId, opts),
   cancelTranscribe: (jobId) => ipcRenderer.invoke('transcribe:cancel', jobId),
@@ -36,6 +37,8 @@ contextBridge.exposeInMainWorld('api', {
   onEmbedProgress: (cb) => ipcRenderer.on('embed:progress', (_e, p) => cb(p)),
   // 区間の音声クリップ生成（試聴） -> { wavPath }
   clipSegment: (filePath, start, end) => ipcRenderer.invoke('clip:segment', filePath, start, end),
+  // メディアファイルの中身を丸ごと取得（結果プレイヤーの Blob 化用） -> { data, type }
+  readMedia: (filePath) => ipcRenderer.invoke('media:read', filePath),
   // 手本（references: { 話者ID: [区間index,...] }）で再識別 -> { labels, speakerCount }
   reassignSpeakers: (jobId, references) => ipcRenderer.invoke('diarize:reassign', jobId, references),
 

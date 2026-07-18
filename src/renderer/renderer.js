@@ -62,6 +62,24 @@ downloadBtn.addEventListener('click', async () => {
   }
 });
 
+// ---- 発話の区切り方（VAD）のプリセット ----
+// 数値は src/core/asr.js の VAD_PRESETS と一致させること（レンダラからは require できない）。
+// 実測の根拠は HANDOFF.md「発話区間の分割」を参照。
+const VAD_PRESETS = {
+  standard: {
+    maxSpeechDuration: 12, minSilenceDuration: 0.35, threshold: 0.5,
+    note: '一般的な音声向け。迷ったらこれ',
+  },
+  conversation: {
+    maxSpeechDuration: 6, minSilenceDuration: 0.2, threshold: 0.35,
+    note: '相槌が重なって無音が少ない音声向け。細かく区切って取りこぼしを防ぎます',
+  },
+  lecture: {
+    maxSpeechDuration: 15, minSilenceDuration: 0.6, threshold: 0.5,
+    note: '一人が続けて話す音声向け。文が途中で切れにくくなります',
+  },
+};
+
 // ---- 認識設定（高精度モード・用語辞書） ----
 const hwText = $('#hotwords-text');
 const hwEnabled = $('#hotwords-enabled');
@@ -228,31 +246,173 @@ function addJob(filePath) {
     }
   });
 
+  // ---- 発話の区切り方（VAD）----
+  // 認識モデルは短い発話向けなので、1区間が長すぎると中身が数文字に潰れる。
+  // 音声の性質（会話か独話か）で最適値が変わるためジョブ単位で選べるようにする。
+  const vadSeg = Array.from(el.querySelectorAll('.vad-seg .seg-opt'));
+  const vadMax = el.querySelector('.vad-max');
+  const vadSil = el.querySelector('.vad-sil');
+  const vadTh = el.querySelector('.vad-th');
+  const vadPresetNote = el.querySelector('.vad-preset-note');
+  const vadBadge = el.querySelector('.vad-custom-badge');
+
+  let vadPreset = 'standard';
+
+  function applyPreset(name) {
+    vadPreset = name;
+    const p = VAD_PRESETS[name];
+    vadMax.value = p.maxSpeechDuration;
+    vadSil.value = p.minSilenceDuration;
+    vadTh.value = p.threshold;
+    vadSeg.forEach((b) => b.classList.toggle('is-active', b.dataset.preset === name));
+    vadPresetNote.textContent = p.note;
+    syncVadLabels();
+    vadBadge.classList.add('hidden');
+  }
+
+  function syncVadLabels() {
+    el.querySelector('.vad-max-val').textContent = vadMax.value;
+    el.querySelector('.vad-sil-val').textContent = Number(vadSil.value).toFixed(2);
+    el.querySelector('.vad-th-val').textContent = Number(vadTh.value).toFixed(2);
+  }
+
+  // スライダーを動かしたらプリセットから外れた印を出す（値そのものは保持）
+  function markCustom() {
+    syncVadLabels();
+    const p = VAD_PRESETS[vadPreset];
+    const same = Number(vadMax.value) === p.maxSpeechDuration
+      && Number(vadSil.value) === p.minSilenceDuration
+      && Number(vadTh.value) === p.threshold;
+    vadBadge.classList.toggle('hidden', same);
+  }
+
+  vadSeg.forEach((b) => b.addEventListener('click', () => applyPreset(b.dataset.preset)));
+  [vadMax, vadSil, vadTh].forEach((s) => s.addEventListener('input', markCustom));
+  el.querySelector('.vad-reset').addEventListener('click', () => applyPreset(vadPreset));
+  applyPreset('standard');
+
+  const vadOptions = () => ({
+    preset: vadPreset,
+    maxSpeechDuration: Number(vadMax.value),
+    minSilenceDuration: Number(vadSil.value),
+    threshold: Number(vadTh.value),
+  });
+
   // 文字起こし開始
   el.querySelector('.start-btn').addEventListener('click', () => {
-    startTranscribe(jobId, filePath, { denoiseStrength });
+    startTranscribe(jobId, filePath, { denoiseStrength, vad: vadOptions() });
   });
+
+  // ---- 結果側の操作は「ジョブ生成時に1回だけ」束ねる ----
+  // やり直しで onJobDone が複数回走るため、ここ以外で addEventListener すると
+  // ハンドラが二重登録され、書き出しが2回走るなどの不具合になる。
+  el.querySelector('.cancel-btn').addEventListener('click', () => {
+    window.api.cancelTranscribe(jobId);
+    el.querySelector('.job-status').textContent = '中止中…';
+  });
+  el.querySelector('.redo-btn').addEventListener('click', () => reopenSetup(jobId));
+  el.querySelector('.back-btn').addEventListener('click', () => closeSetup(jobId));
+  el.querySelector('.tag-btn').addEventListener('click', () => {
+    if (jobs.get(jobId).result) enterTaggingMode(jobId);
+  });
+  el.querySelector('.reassign-btn').addEventListener('click', () => doReassign(jobId));
+  el.querySelectorAll('.toolbar button[data-fmt]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const job = jobs.get(jobId);
+      if (job.result) window.api.saveExport(exportPayload(job), btn.dataset.fmt);
+    });
+  });
+  el.querySelector('.copy-btn').addEventListener('click', () => {
+    const job = jobs.get(jobId);
+    if (job.result) navigator.clipboard.writeText(plainTextWithSpeakers(job));
+  });
+  el.querySelector('.audio-result').addEventListener('error', () => {
+    // Chromium が扱えない形式。区間再生はクリップ方式へ、全体再生は隠す。
+    const job = jobs.get(jobId);
+    if (!job.result) return; // src 未設定/クリア時の空振りは無視
+    job.fullAudioBroken = true;
+    el.querySelector('.result-audio-row').classList.add('hidden');
+  });
+}
+
+// 文字起こし済みのジョブを設定画面に戻す（別条件でやり直すため）。
+// 設定コントロールは DOM に残っているので、前回の値がそのまま初期値になる。
+function reopenSetup(jobId) {
+  const job = jobs.get(jobId);
+  const el = job.el;
+  stopSegmentPlayback(job);
+  el.querySelector('.audio-result').pause();
+  el.querySelector('.job-result').classList.add('hidden');
+  el.querySelector('.job-setup').classList.remove('hidden');
+  // 実際にやり直すまで前の結果は保持しておき、いつでも戻れるようにする
+  el.querySelector('.back-btn').classList.toggle('hidden', !job.result);
+  const status = el.querySelector('.job-status');
+  status.textContent = '設定を変更中';
+  status.classList.remove('done', 'error');
+}
+
+// やり直しをやめて、保持しておいた前回の結果表示に戻る
+function closeSetup(jobId) {
+  const job = jobs.get(jobId);
+  const el = job.el;
+  if (!job.result) return;
+  el.querySelector('.job-setup').classList.add('hidden');
+  el.querySelector('.job-result').classList.remove('hidden');
+  const status = el.querySelector('.job-status');
+  status.textContent = '完了';
+  status.classList.add('done');
 }
 
 function startTranscribe(jobId, filePath, opts) {
   const job = jobs.get(jobId);
   job.denoiseStrength = opts.denoiseStrength || 0; // 後付け声紋計算で同条件にする
   const el = job.el;
+  resetResultUi(job);
+  el.querySelector('.back-btn').classList.add('hidden');
   el.querySelector('.job-setup').classList.add('hidden');
   el.querySelector('.progress-wrap').classList.remove('hidden');
+  el.querySelector('.progress-wrap .bar').style.width = '0%';
   const status = el.querySelector('.job-status');
   status.textContent = opts.denoiseStrength > 0 ? '処理中…（ノイズ除去）' : '処理中…';
+  status.classList.remove('done', 'error');
   job.startTime = Date.now();               // 残り時間推定の基点
   el.querySelector('.eta').textContent = '';
-
-  el.querySelector('.cancel-btn').addEventListener('click', () => {
-    window.api.cancelTranscribe(jobId);
-    status.textContent = '中止中…';
-  });
 
   window.api.transcribe(filePath, jobId, opts)
     .then((result) => onJobDone(jobId, result))
     .catch((err) => onJobError(jobId, err));
+}
+
+// やり直し時に前回の結果表示を白紙に戻す（話者タグ付けの状態も含めて）。
+function resetResultUi(job) {
+  const el = job.el;
+  stopSegmentPlayback(job);
+  job.result = null;
+  job.names = {};
+  job.anchors = new Map();
+  job.maxSpeaker = -1;
+  job.tagging = false;
+  job.fullAudioBroken = false;
+
+  const audio = el.querySelector('.audio-result');
+  audio.pause();
+  audio.removeAttribute('src');
+  audio.load();
+  if (job._audioObjectUrl) { URL.revokeObjectURL(job._audioObjectUrl); job._audioObjectUrl = null; }
+
+  el.querySelector('.job-result').classList.add('hidden');
+  el.querySelector('.result-audio-row').classList.remove('hidden');
+  el.querySelector('.segments').innerHTML = '';
+  el.querySelector('.embed-progress').classList.add('hidden');
+  el.querySelector('.diar-edit').classList.add('hidden');
+  el.querySelector('.merge-toggle').classList.add('hidden');
+  el.querySelector('.merge-spk').checked = false;
+  el.querySelector('.reassign-status').textContent = '';
+  const bar = el.querySelector('.speakers-bar');
+  if (bar) bar.remove();
+  const tagBtn = el.querySelector('.tag-btn');
+  tagBtn.classList.remove('hidden');
+  tagBtn.disabled = false;
 }
 
 // 話者ごとの色（最大8色で循環）
@@ -298,23 +458,32 @@ function onJobDone(jobId, result) {
   status.classList.add('done');
   el.querySelector('.job-result').classList.remove('hidden');
 
-  // 「話者でタグ付け」開始
-  const tagBtn = el.querySelector('.tag-btn');
-  if (result.segments.length) {
-    tagBtn.addEventListener('click', () => enterTaggingMode(jobId));
-  } else {
-    tagBtn.classList.add('hidden');
-  }
-  el.querySelector('.reassign-btn').addEventListener('click', () => doReassign(jobId));
+  // 結果欄の再生プレイヤー。各区間の ▶ もこの要素をシークして鳴らすので、
+  // ここが唯一の音源になる。
+  // 操作系のハンドラは addJob で一度だけ登録済み（やり直しでの二重登録を避けるため）。
+  loadResultAudio(job);
+  if (!result.segments.length) el.querySelector('.tag-btn').classList.add('hidden');
 
   renderResult(jobId);
+}
 
-  el.querySelectorAll('.toolbar button[data-fmt]').forEach((btn) => {
-    btn.addEventListener('click', () => window.api.saveExport(exportPayload(job), btn.dataset.fmt));
-  });
-  el.querySelector('.copy-btn').addEventListener('click', () => {
-    navigator.clipboard.writeText(plainTextWithSpeakers(job));
-  });
+// 結果欄の音源を Blob URL として読み込む。
+// app-media URL を <audio> に直接渡すと、区間の頭出し（シーク）の瞬間に
+// MEDIA_ERR_NETWORK で落ちる（src/main/mediaProtocol.js の注記参照）。
+// IPC でファイルの中身を受け取り Blob にすれば、シークはメモリ内で完結して安定する。
+// （fetch(app-media://…) は file:// ページからだと Chromium に拒否されるので使えない）
+async function loadResultAudio(job) {
+  const audio = job.el.querySelector('.audio-result');
+  try {
+    const { data, type } = await window.api.readMedia(job.result.filePath);
+    if (job._audioObjectUrl) URL.revokeObjectURL(job._audioObjectUrl);
+    job._audioObjectUrl = URL.createObjectURL(new Blob([data], { type }));
+    audio.src = job._audioObjectUrl;
+  } catch (e) {
+    // 取得に失敗したら直接 URL で読む（再生は可能・シークは不安定）
+    console.warn('media read failed, falling back to direct URL', e);
+    audio.src = window.api.mediaUrl(job.result.filePath);
+  }
 }
 
 // 話者タグ付けモードに入る（声紋を遅延計算してから編集UIを出す）
@@ -333,6 +502,7 @@ async function enterTaggingMode(jobId) {
     if (job.maxSpeaker < 0) job.maxSpeaker = 0; // 最初の話者を用意
     ep.classList.add('hidden');
     tagBtn.classList.add('hidden');
+    el.querySelector('.merge-toggle').classList.remove('hidden'); // まとめ設定は話者識別後のみ
     el.querySelector('.diar-edit').classList.remove('hidden');
     renderResult(jobId);
   } catch (e) {
@@ -356,6 +526,9 @@ function renderResult(jobId) {
 
   if (job.tagging) renderSpeakersBar(jobId);
 
+  // 行を作り直すと再生中ボタンの参照が失われるので、先に止めておく
+  stopSegmentPlayback(job);
+
   const segEl = el.querySelector('.segments');
   segEl.innerHTML = '';
   if (!result.segments.length) {
@@ -366,14 +539,13 @@ function renderResult(jobId) {
     const row = document.createElement('div');
     row.className = 'seg';
 
-    if (job.tagging) {
-      const play = document.createElement('button');
-      play.className = 'seg-play';
-      play.textContent = '▶';
-      play.title = 'この区間を再生';
-      play.addEventListener('click', () => playSegment(jobId, s, play));
-      row.appendChild(play);
-    }
+    // ▶ は常時表示（話者タグ付け中でなくても区間を聴き返せるように）
+    const play = document.createElement('button');
+    play.className = 'seg-play';
+    play.textContent = '▶';
+    play.title = 'この区間を再生';
+    play.addEventListener('click', () => playSegment(jobId, s, play));
+    row.appendChild(play);
 
     const ts = document.createElement('span');
     ts.className = 'ts';
@@ -467,9 +639,44 @@ function renderSpeakersBar(jobId) {
   }
 }
 
-// 区間のクリップを生成して頭から再生（シーク不要で確実）
+// ---- 区間再生 ----
+// 基本は結果欄の <audio>（元ファイルそのもの）を区間の開始位置へシークし、
+// 終了時刻で止める。クリップ生成が不要なので即座に鳴る。
+// ただし Chromium が元ファイルを再生できない形式（一部の動画コンテナ等）もあるため、
+// その場合は従来どおり ffmpeg でクリップを作って鳴らす方式へ自動的に切り替える。
+function stopSegmentPlayback(job) {
+  if (job._segStop) { job._segStop(); job._segStop = null; }
+}
+
+async function playSegmentViaFullAudio(job, seg, btn) {
+  const audio = job.el.querySelector('.audio-result');
+  stopSegmentPlayback(job);
+
+  const onTimeUpdate = () => { if (audio.currentTime >= seg.end) stop(); };
+  const stop = () => {
+    audio.removeEventListener('timeupdate', onTimeUpdate);
+    audio.removeEventListener('pause', stop);
+    audio.pause();
+    btn.textContent = '▶';
+    btn.classList.remove('is-playing');
+    job._segStop = null;
+  };
+
+  audio.currentTime = seg.start;
+  btn.textContent = '■';
+  btn.classList.add('is-playing');
+  job._segStop = stop;
+
+  // 再生が始まってから監視を付ける。play() 解決前に timeupdate/pause が来ると
+  // stop() → pause() が走り、play() が AbortError で落ちる。
+  await audio.play();
+  audio.addEventListener('timeupdate', onTimeUpdate);
+  audio.addEventListener('pause', stop);
+}
+
+// フォールバック: 区間のクリップを生成して頭から再生（シーク不要で確実）
 let sharedAudio = null;
-async function playSegment(jobId, seg, btn) {
+async function playSegmentViaClip(jobId, seg, btn) {
   const job = jobs.get(jobId);
   if (!sharedAudio) sharedAudio = new Audio();
   sharedAudio.pause();
@@ -486,6 +693,24 @@ async function playSegment(jobId, seg, btn) {
     btn.textContent = '▶';
     console.error('clip play failed', e);
   }
+}
+
+async function playSegment(jobId, seg, btn) {
+  const job = jobs.get(jobId);
+  // 再生中の区間をもう一度押したら停止
+  if (btn.classList.contains('is-playing')) { stopSegmentPlayback(job); return; }
+  if (!job.fullAudioBroken) {
+    // play() の reject は「形式が扱えない」とは限らない（連打による中断など）。
+    // クリップ方式への切り替えは <audio> の error イベントだけで判断する。
+    try {
+      await playSegmentViaFullAudio(job, seg, btn);
+    } catch (e) {
+      stopSegmentPlayback(job);
+      console.warn('segment playback interrupted', e);
+    }
+    return;
+  }
+  await playSegmentViaClip(jobId, seg, btn);
 }
 
 // 手本（アンカー）で再識別
@@ -508,9 +733,30 @@ async function doReassign(jobId) {
   }
 }
 
+// 「同じ話者をまとめる」がONか（話者タグ付け中のみ有効）
+function mergeEnabled(job) {
+  return job.tagging && job.el.querySelector('.merge-spk').checked;
+}
+
+// 連続する同一話者の区間を1つにまとめる（shared/export.js の mergeSameSpeaker と同じ規則）
+function mergeSameSpeaker(segments) {
+  const join = (a, b) => (!a ? b : !b ? a : (a.endsWith('。') ? `${a}${b}` : `${a}。${b}`));
+  const out = [];
+  for (const s of segments) {
+    const prev = out[out.length - 1];
+    if (prev && s.speaker != null && s.speaker >= 0 && prev.speaker === s.speaker) {
+      prev.end = s.end;
+      prev.text = join(prev.text, s.text);
+    } else {
+      out.push({ ...s });
+    }
+  }
+  return out;
+}
+
 // エクスポート/コピー用に話者名を埋め込んだ結果を作る
 function exportPayload(job) {
-  return { ...job.result, speakerNames: { ...job.names } };
+  return { ...job.result, speakerNames: { ...job.names }, mergeSpeakers: mergeEnabled(job) };
 }
 // 秒 -> "HH:MM:SS"（コピー用の時刻プレフィックス。export.js の formatClock と揃える）
 function fmtClock(sec) {
@@ -522,7 +768,8 @@ function fmtClock(sec) {
   return `${p(h)}:${p(m)}:${p(s)}`;
 }
 function plainTextWithSpeakers(job) {
-  return job.result.segments.map((s) => {
+  const segments = mergeEnabled(job) ? mergeSameSpeaker(job.result.segments) : job.result.segments;
+  return segments.map((s) => {
     const ts = `[${fmtClock(s.start)} --> ${fmtClock(s.end)}] `;
     const n = job.tagging ? speakerLabel(job, s.speaker) : '';
     return ts + (n ? `${n}: ${s.text}` : s.text);
@@ -537,6 +784,9 @@ function onJobError(jobId, err) {
   const msg = String(err.message || err);
   status.textContent = msg.includes('中止') ? '中止しました' : `エラー: ${msg}`;
   status.classList.add('error');
+  // 失敗・中止したら設定画面に戻し、条件を変えて再実行できるようにする
+  job.el.querySelector('.job-setup').classList.remove('hidden');
+  job.el.querySelector('.back-btn').classList.toggle('hidden', !job.result);
 }
 
 // ---- このアプリについて / ライセンス（About モーダル） ----

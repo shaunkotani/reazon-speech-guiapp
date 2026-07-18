@@ -2,12 +2,13 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { fork, spawn } = require('child_process');
-const { app, BrowserWindow, ipcMain, dialog, protocol, net, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol, shell } = require('electron');
 
 const { autoUpdater } = require('electron-updater');
 const modelManager = require('./modelManager');
 const exporters = require('../shared/export');
 const { assignByReferences, UNKNOWN_THRESHOLD } = require('../shared/cluster');
+const { registerMediaProtocol, MEDIA_MIME } = require('./mediaProtocol');
 
 // <audio> から元音声/除去後音声を再生するためのローカルメディア配信スキーム
 protocol.registerSchemesAsPrivileged([
@@ -246,6 +247,19 @@ ipcMain.handle('embeddings:compute', async (event, jobId, filePath, denoiseStren
   }
 });
 
+// メディアファイルの中身を丸ごと返す（結果画面の再生プレイヤー用）。
+// renderer はこれを Blob URL にして <audio> に渡す。app-media URL を直接
+// <audio> に渡すと、区間の頭出し（シーク）で MEDIA_ERR_NETWORK になるため
+// （src/main/mediaProtocol.js の注記参照）、ネットワーク層を完全に迂回する。
+const MAX_MEDIA_READ_BYTES = 1024 * 1024 * 1024; // 1GB。超える場合は renderer 側でフォールバック
+ipcMain.handle('media:read', async (event, filePath) => {
+  const stat = await fs.promises.stat(filePath);
+  if (stat.size > MAX_MEDIA_READ_BYTES) throw new Error('ファイルが大きすぎます');
+  const data = await fs.promises.readFile(filePath);
+  const type = MEDIA_MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
+  return { data, type };
+});
+
 // 区間の音声クリップを生成して再生用パスを返す（試聴）
 ipcMain.handle('clip:segment', async (event, filePath, start, end) => {
   await ensurePool();
@@ -263,7 +277,10 @@ ipcMain.handle('transcribe:file', async (event, filePath, jobId, opts = {}) => {
   try {
     // Stage A: 1 ワーカーでデコード+ノイズ除去+VAD → 共有 PCM と区間境界
     sendProgress(0.02);
-    const prep = await rpc(pool[0], 'prepare', { filePath, denoiseStrength: opts.denoiseStrength || 0, outPath: pcmPath });
+    const prep = await rpc(pool[0], 'prepare', {
+      filePath, denoiseStrength: opts.denoiseStrength || 0, outPath: pcmPath,
+      vad: opts.vad || {}, // 発話検出の設定（未指定なら core の標準値）
+    });
     checkCancel(jobId);
     const segs = prep.segments;
     const total = segs.length;
@@ -526,12 +543,7 @@ app.whenReady().then(() => {
   if (process.platform === 'darwin' && app.dock && fs.existsSync(appIconPath)) {
     try { app.dock.setIcon(appIconPath); } catch (_) { /* ignore */ }
   }
-  // app-media://media/<絶対パス> をローカルファイルとして配信（範囲リクエスト対応で seek 可能）
-  protocol.handle('app-media', (request) => {
-    const u = new URL(request.url);
-    const filePath = decodeURIComponent(u.pathname);
-    return net.fetch('file://' + filePath, { headers: request.headers });
-  });
+  registerMediaProtocol(protocol);
   createWindow();
   // 起動直後に静かに更新チェック（UIが受け取れるよう少し遅らせる）
   mainWindow.webContents.once('did-finish-load', () => setTimeout(checkForUpdatesOnStartup, 1500));

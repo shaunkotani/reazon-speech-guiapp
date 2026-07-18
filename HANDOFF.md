@@ -53,6 +53,13 @@ release/               ビルド成果物（.dmg 等）
 4. **VAD区間先頭の語落ち** → 各区間の前後に 0.3秒無音パディング（`padSamples`）。
 5. **HuggingFace は相対パスへリダイレクト**する → ダウンロードは `new URL(location, base)` で解決（`modelManager.downloadFile`）。
 6. **ffmpeg-static のパス**はパッケージ後 asar 内になる → `app.asar`→`app.asar.unpacked` に置換（`resolveFfmpegPath`）。asarUnpack 対象: ffmpeg-static / sherpa-onnx-node / sherpa-onnx-*。
+7. **`app-media:` スキームの `<audio>` はシーク不可**（protocol.handle の制約。Range を 206 で正しく返しても
+   ファイル途中の読み直しで `MEDIA_ERR_NETWORK` / `PIPELINE_ERROR_READ`。`fetch(app-media://…)` も
+   file:// ページからは Chromium が拒否）。→ シークが要る結果プレイヤーは **IPC `media:read` で中身を受け取り
+   Blob URL 化**（renderer `loadResultAudio`）。CSP の media-src に `blob:` が必要。頭から流すだけのクリップ再生は
+   app-media 直のままで良い。回帰テスト: `npx electron scripts/test-renderer-playback.js`（認識はスタブ・GUI 不要）／
+   `npx electron scripts/test-media-seek.js`。テストハーネスは**必ず watchdog で強制終了**させること
+   （例外→未処理 rejection→隠しウィンドウのままゾンビ化、が実際に起きた）。
 
 ## 5. 実装済み機能（すべて実機GUI検証済み）
 1. ファイルD&D／選択 → 文字起こし（タイムスタンプ付き）
@@ -92,7 +99,7 @@ npm install
 npm start                              # dev 起動（./models があれば使用）
 npm run dist:mac                       # macOS(arm64) .dmg → release/
 npm run dist:win                       # Windows(x64) .exe ※Windows実機で実行
-node scripts/test-pool.js samples/twospk.wav 2     # 並列＋話者分離CLI検証
+node scripts/test-pool.js samples/twospeaksample.mp3 2  # 並列＋話者分離CLI検証
 node scripts/test-enroll.js                        # 後付けタグ付けフローCLI検証
 node scripts/test-hotwords.js samples/natural.wav "文字起こし,議事録" 3.0  # 辞書+beam検証（greedy比較）
 ```
@@ -129,16 +136,40 @@ node scripts/test-hotwords.js samples/natural.wav "文字起こし,議事録" 3.
 - (1) 用語辞書を実機GUIで通し検証（保存→文字起こしで反映されるか）。(2) hotwordsScore の既定値（現状2.0）を実運用で調整。(3) 余力あれば D（音量正規化）。
 - 自動アップデート(v1.3.0)の実地確認: **リポジトリを public 化**した上で、旧バージョン→新バージョンの更新検知・DL・再起動適用を実機で確認。
 
-### 併せて質問されていた「どこまで聞き取るか」パラメータ（既存の感度ノブ）
-`core.createVad` / `createRecognizer` にある:
+### 発話区間の分割（VAD）— 認識結果を最も左右するノブ
+**k2-v2 は短い発話で学習された RNN-T なので、1区間が長いと出力が数トークンに潰れる。**
+区間長は精度の微調整ではなく「文字が出るか消えるか」を決める。19秒の電話音声
+（`samples/twospeaksample.mp3`）を旧既定 `minSilence 0.5 / maxSpeech 20` で通すと、
+無音が無いため全体が1区間になり結果が「もう楽しかった」7文字に潰れた。実測:
+
+| 設定 (threshold/minSilence/maxSpeech) | 区間数 | 認識文字数 |
+|---|---|---|
+| 0.5 / 0.5 / 20（旧既定） | 1 | 7 |
+| 0.5 / 0.35 / 12（新既定 standard） | 3 | 57 |
+| 0.35 / 0.2 / 6（conversation） | 4 | 77 |
+
+`natural.wav` / `test.wav` は standard で旧既定と同一結果（劣化なし）。conversation は
+無音の多い独話だと文中で切れるため、プリセットを分けている。
+
+- プリセット定義は `core/asr.js` の `VAD_PRESETS`（standard / conversation / lecture）。
+  **レンダラの `renderer.js` にも同じ表を持つ**（require できないため）ので、変更時は両方直す。
+- UI はジョブ単位（`.vad-row` のプリセット + `.vad-details` の3スライダー）。
+  値は `transcribe:file` の `opts.vad` → worker `prepare` へ流れ、`vadFor()` が
+  設定変更時だけ VAD を作り直す（**認識モデルは再ロードしない**ので切替は軽い）。
+- `normalizeVadOptions()` が範囲外・不正値を丸める（UI 以外から来ても壊れない）。
+
+その他の感度ノブ:
 - VAD `threshold`(0.5): 下げると小声も拾う（過検出も増）
 - `minSpeechDuration`(0.25s): これより短い発話を無視（相槌/ノイズ除去）
-- `minSilenceDuration`(0.5s): 区間を切る無音長
-- `maxSpeechDuration`(20s): 長区間の強制分割上限
 - recognizer `blankPenalty`: 上げると出力を促す（脱落減・挿入増リスク）
 - 各区間に 0.3秒パディング（`PAD_SEC`）
 - `createRecognizer` の `hotwordsScore`(既定2.0)/`maxActivePaths`(既定4): 辞書の効き具合と beam 探索幅
 
 ## 9. サンプル音声（samples/、gitignore）
-- `natural.wav` 1話者（自然なポーズ入り）／`twospk.wav` 2話者（Kyoko/Otoya）／`long.m4a`／`test.wav`
+- `twospeaksample.mp3` **実録音の2人の電話（19秒）**。話者分離・VAD 検証の標準 fixture。
+  `test-pool.js` / `test-enroll.js` の既定入力。相槌が重なり無音がほぼ無いので、
+  VAD 設定の検証にもこれを使う（合成音声では長区間潰れが再現しない）。
+- `natural.wav` 1話者（自然なポーズ入り）／`long.m4a`／`test.wav`
+- 旧 `twospk.wav`（`say` の Kyoko/Otoya 合成）は**実聴で同一話者に聞こえ 2話者 fixture として機能しない**ため削除し、
+  `twospeaksample.mp3` に置き換えた。
 - 合成音声(`say`)は声が似ていて自動クラスタリングが効きにくい。**話者識別の検証は「人数指定 or 手本」で行うこと**（実音声なら自動でも分離する）。

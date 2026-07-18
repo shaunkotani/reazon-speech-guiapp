@@ -7,7 +7,7 @@
 // {type:'event', rid, ...} を送り、完了で {type:'response', rid, result} を返す。
 const core = require('../core/asr');
 
-let ctx = null;          // { recognizer, vad, denoiser, embedder }
+let ctx = null;          // { recognizer, vad, vadPath, vadKey, denoiser, embedder }
 let pcmCache = null;     // { path, samples } 直近に読んだ PCM をキャッシュ
 
 function init({ modelDir, vadPath, denoiserPath, embPath, hotwordsFile, hotwordsScore, beamSearch }) {
@@ -15,10 +15,23 @@ function init({ modelDir, vadPath, denoiserPath, embPath, hotwordsFile, hotwords
     // hotwordsFile があれば core 側で modified_beam_search + 辞書に切り替わる。
     // 辞書が無くても beamSearch=true なら高精度モード（beam search）で認識する。
     recognizer: core.createRecognizer(modelDir, { hotwordsFile: hotwordsFile || '', hotwordsScore, beamSearch: !!beamSearch }),
+    vadPath,
     vad: core.createVad(vadPath),
+    vadKey: JSON.stringify(core.normalizeVadOptions({})),
     denoiser: denoiserPath ? core.createDenoiser(denoiserPath) : null,
     embedder: embPath ? core.createEmbeddingExtractor(embPath) : null,
   };
+}
+
+// VAD 設定はジョブごとに変わりうる。設定が変わった時だけ作り直す
+// （silero_vad.onnx は数MBなので再生成は軽い。認識モデルには触らない）。
+function vadFor(opts) {
+  const key = JSON.stringify(core.normalizeVadOptions(opts));
+  if (key !== ctx.vadKey) {
+    ctx.vad = core.createVad(ctx.vadPath, opts || {});
+    ctx.vadKey = key;
+  }
+  return ctx.vad;
 }
 
 function loadPcm(pcmPath) {
@@ -31,14 +44,14 @@ function loadPcm(pcmPath) {
 // ---- 各オペレーション ----
 const OPS = {
   // デコード+ノイズ除去 → 一時 WAV 保存 → VAD 区間境界を返す
-  async prepare({ filePath, denoiseStrength, outPath }) {
+  async prepare({ filePath, denoiseStrength, outPath, vad }) {
     let samples = await core.decodeToPcm(filePath);
     if (ctx.denoiser && denoiseStrength > 0) {
       samples = core.denoisePcm(ctx.denoiser, samples, denoiseStrength);
     }
     const duration = samples.length / core.SAMPLE_RATE;
     core.writePcmRaw(samples, outPath); // 共有用 raw float32
-    const segs = core.collectVadSegments(samples, ctx.vad);
+    const segs = core.collectVadSegments(samples, vadFor(vad));
     return { pcmPath: outPath, duration, segments: segs.map((s) => ({ start: s.start, end: s.end })) };
   },
 

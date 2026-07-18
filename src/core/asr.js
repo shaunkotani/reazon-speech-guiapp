@@ -220,18 +220,55 @@ function extractEmbedding(extractor, samples) {
   return extractor.compute(stream, false);
 }
 
+// ==== VAD（発話区間検出）の設定 ====
+//
+// 認識モデル reazonspeech-k2-v2 は短い発話で学習された RNN-T のため、長い区間を
+// そのまま渡すと出力が数トークンに潰れて中身がほぼ失われる。つまり VAD が区間を
+// 切れるかどうかが認識結果を直接左右する。相槌が重なる電話・会議の音声では
+// 無音がほとんど発生せず、区切りが入らないまま上限まで伸びてしまうため、
+// 用途に応じて調整できるようにしている。
+const DEFAULT_VAD = {
+  threshold: 0.5,          // 発話と判定する確信度。低いほど小声も拾うがノイズも拾う
+  minSilenceDuration: 0.35, // この長さの無音で区間を区切る。短いほど細かく割れる
+  minSpeechDuration: 0.25,  // これより短い音は発話とみなさない（クリック音などの除去）
+  maxSpeechDuration: 12,    // 無音が来なくてもこの秒数で強制的に区切る
+};
+
+// 用途別プリセット。値は samples/ の音声で実測して決めた（HANDOFF.md 参照）。
+const VAD_PRESETS = {
+  standard:     { threshold: 0.5,  minSilenceDuration: 0.35, minSpeechDuration: 0.25, maxSpeechDuration: 12 },
+  conversation: { threshold: 0.35, minSilenceDuration: 0.2,  minSpeechDuration: 0.25, maxSpeechDuration: 6 },
+  lecture:      { threshold: 0.5,  minSilenceDuration: 0.6,  minSpeechDuration: 0.25, maxSpeechDuration: 15 },
+};
+
+// UI や IPC から来た値を安全な範囲に丸める。未指定の項目は標準値で埋める。
+function normalizeVadOptions(opts) {
+  const clamp = (v, lo, hi, dflt) =>
+    (typeof v === 'number' && isFinite(v)) ? Math.min(hi, Math.max(lo, v)) : dflt;
+  const base = (opts && typeof opts.preset === 'string' && VAD_PRESETS[opts.preset])
+    ? VAD_PRESETS[opts.preset]
+    : DEFAULT_VAD;
+  const o = opts || {};
+  return {
+    threshold:          clamp(o.threshold,          0.1,  0.9, base.threshold),
+    minSilenceDuration: clamp(o.minSilenceDuration, 0.05, 2.0, base.minSilenceDuration),
+    minSpeechDuration:  clamp(o.minSpeechDuration,  0.05, 1.0, base.minSpeechDuration),
+    maxSpeechDuration:  clamp(o.maxSpeechDuration,  2,    30,  base.maxSpeechDuration),
+  };
+}
+
 /**
  * VAD を生成する。
  * @param {string} vadModelPath silero_vad.onnx のパス
+ * @param {object} [opts] DEFAULT_VAD の各項目を上書きできる。
+ *   `preset` に VAD_PRESETS のキーを渡すと、その値を土台にする。
  */
-function createVad(vadModelPath, { numThreads = 1, bufferSizeInSeconds = 60 } = {}) {
+function createVad(vadModelPath, opts = {}) {
+  const { numThreads = 1, bufferSizeInSeconds = 60 } = opts;
   return new sherpa.Vad({
     sileroVad: {
       model: vadModelPath,
-      threshold: 0.5,
-      minSilenceDuration: 0.5,
-      minSpeechDuration: 0.25,
-      maxSpeechDuration: 20,
+      ...normalizeVadOptions(opts),
       windowSize: 512,
     },
     sampleRate: SAMPLE_RATE,
@@ -354,6 +391,9 @@ async function renderPreviewWav(filePath, ctx, outPath, { denoiseStrength = 0, m
 
 module.exports = {
   SAMPLE_RATE,
+  DEFAULT_VAD,
+  VAD_PRESETS,
+  normalizeVadOptions,
   resolveFfmpegPath,
   decodeToPcm,
   createRecognizer,

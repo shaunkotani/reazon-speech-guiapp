@@ -33,7 +33,7 @@ function rpc(w, op, args, onEvent) {
 }
 
 (async () => {
-  const file = process.argv[2] || path.join(__dirname, '..', 'samples', 'twospk.wav');
+  const file = process.argv[2] || path.join(__dirname, '..', 'samples', 'twospeaksample.mp3');
   const numSpeakers = parseInt(process.argv[3] || '2', 10);
   const pool = Array.from({ length: POOL }, spawnWorker);
   await Promise.all(pool.map((w) => w.ready));

@@ -2,7 +2,8 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' app-media:;" />
+  <!-- media-src: app-media はクリップ再生用、blob は結果プレイヤー（IPC で読んで Blob 化）用 -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' app-media: blob:;" />
   <title>モコシ</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -111,8 +112,50 @@
           <span class="plabel">除去後<br><small>先頭10秒</small></span>
           <audio class="audio-denoised" controls preload="metadata"></audio>
         </div>
+
+        <!-- 発話の区切り方（VAD） -->
+        <div class="vad-row">
+          <span class="plabel">話し方</span>
+          <div class="vad-seg" role="radiogroup" aria-label="音声の話し方">
+            <button type="button" class="seg-opt is-active" data-preset="standard">標準</button>
+            <button type="button" class="seg-opt" data-preset="conversation">会話・電話</button>
+            <button type="button" class="seg-opt" data-preset="lecture">講演・朗読</button>
+          </div>
+          <span class="vad-note vad-preset-note"></span>
+        </div>
+        <details class="vad-details">
+          <summary>区切りの詳細設定 <span class="vad-custom-badge hidden">カスタム</span></summary>
+          <div class="vad-body">
+            <p class="hint">
+              このアプリは音声を「無音」で区切ってから1区間ずつ認識します。認識モデルは
+              <strong>短い発話向けに作られている</strong>ため、1区間が長すぎると、その区間の文字が
+              まとめて数文字に潰れて消えます。相槌が重なる電話・会議の音声で
+              「ほんの一言しか出てこない」時は、ここを短くしてください。
+            </p>
+            <label class="vad-ctl">
+              <span class="vad-ctl-name">1区間の最大長 <b class="vad-max-val">12</b> 秒</span>
+              <input type="range" class="vad-max" min="3" max="20" step="1" value="12" />
+              <span class="vad-ctl-help">無音が来なくてもこの秒数で強制的に区切ります。<strong>短くすると取りこぼしが減り</strong>、長くすると文が途中で切れにくくなります。会話音声で結果が極端に短い時は、まずこれを下げてください。</span>
+            </label>
+            <label class="vad-ctl">
+              <span class="vad-ctl-name">区切る無音の長さ <b class="vad-sil-val">0.35</b> 秒</span>
+              <input type="range" class="vad-sil" min="0.1" max="1" step="0.05" value="0.35" />
+              <span class="vad-ctl-help">この長さの無音があれば区間を分けます。<strong>短くすると細かく分かれ</strong>、話者の入れ替わりを捉えやすくなりますが、文の途中で切れることがあります。</span>
+            </label>
+            <label class="vad-ctl">
+              <span class="vad-ctl-name">音声の検出感度 <b class="vad-th-val">0.50</b></span>
+              <input type="range" class="vad-th" min="0.1" max="0.9" step="0.05" value="0.5" />
+              <span class="vad-ctl-help">小さいほど小さな声も発話として拾いますが、ノイズも拾いやすくなります。声が小さくて認識されない時に下げてください。</span>
+            </label>
+            <div class="vad-actions">
+              <button type="button" class="vad-reset ghost">プリセットに戻す</button>
+            </div>
+          </div>
+        </details>
+
         <div class="setup-actions">
           <button class="start-btn">この設定で文字起こし</button>
+          <button class="back-btn ghost hidden">やめて前の結果に戻る</button>
         </div>
       </div>
 
@@ -122,10 +165,19 @@
         <button class="cancel-btn">中止</button>
       </div>
       <div class="job-result hidden">
+        <div class="result-audio-row">
+          <span class="plabel">音声</span>
+          <audio class="audio-result" controls preload="metadata"></audio>
+          <span class="result-audio-note">各行の ▶ でその区間だけ再生できます</span>
+        </div>
         <div class="toolbar">
           <span class="meta"></span>
           <span class="spacer"></span>
+          <button class="redo-btn" title="ノイズ除去や話し方の設定を変えて、同じ音声をもう一度文字起こしします">設定を変えてやり直す</button>
           <button class="tag-btn">話者でタグ付け</button>
+          <label class="merge-toggle hidden" title="保存・コピー時に、連続する同じ話者の発言を1つにまとめます">
+            <input type="checkbox" class="merge-spk" /> 同じ話者をまとめる
+          </label>
           <button data-fmt="txt">TXT</button>
           <button data-fmt="srt">SRT</button>
           <button data-fmt="vtt">VTT</button>

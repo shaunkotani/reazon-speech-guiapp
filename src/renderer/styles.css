@@ -146,7 +146,7 @@ button:disabled { background: #9ca3af; cursor: default; }
 
 /* 取込後の設定・プレビュー */
 .job-setup { margin: 6px 0 4px; }
-.preview-row, .denoise-row {
+.preview-row, .denoise-row, .vad-row {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -160,15 +160,16 @@ button:disabled { background: #9ca3af; cursor: default; }
   flex-shrink: 0;
 }
 .audio-original, .audio-denoised { height: 32px; flex: 1; min-width: 240px; }
-/* ノイズ除去の強さ切替（セグメントボタン）。常に4択が並び、いつでも切替可能。 */
-.denoise-seg {
+/* ノイズ除去の強さ切替（セグメントボタン）。常に4択が並び、いつでも切替可能。
+   話し方（VAD プリセット）の切替も同じ見た目を使う。 */
+.denoise-seg, .vad-seg {
   display: inline-flex;
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
   flex-shrink: 0;
 }
-.denoise-seg .seg-opt {
+.denoise-seg .seg-opt, .vad-seg .seg-opt {
   background: #fff;
   color: var(--text);
   border: none;
@@ -178,16 +179,69 @@ button:disabled { background: #9ca3af; cursor: default; }
   font-size: 13px;
   cursor: pointer;
 }
-.denoise-seg .seg-opt:first-child { border-left: none; }
-.denoise-seg .seg-opt:hover { background: #eef2ff; }
-.denoise-seg .seg-opt.is-active { background: var(--accent); color: #fff; }
-.denoise-seg .seg-opt.is-active:hover { background: var(--accent-hover); }
+.denoise-seg .seg-opt:first-child, .vad-seg .seg-opt:first-child { border-left: none; }
+.denoise-seg .seg-opt:hover, .vad-seg .seg-opt:hover { background: #eef2ff; }
+.denoise-seg .seg-opt.is-active, .vad-seg .seg-opt.is-active { background: var(--accent); color: #fff; }
+.denoise-seg .seg-opt.is-active:hover, .vad-seg .seg-opt.is-active:hover { background: var(--accent-hover); }
 .denoise-row .preview-btn { background: #eef2ff; color: var(--accent); }
 .denoise-row .preview-btn:hover { background: #e0e7ff; }
 .preview-status { font-size: 12px; color: var(--muted); }
-.setup-actions { margin-top: 8px; }
+.setup-actions { margin-top: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .start-btn { padding: 8px 18px; }
+.back-btn.ghost {
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--border); padding: 7px 12px; font-size: 12px;
+}
+.back-btn.ghost:hover { background: #f1f5f9; color: var(--text); }
+/* 別の設定で取り直す導線。書き出し系より前に置くので控えめな見た目にする */
+.redo-btn { background: #f1f5f9; color: var(--text); }
+.redo-btn:hover { background: #e2e8f0; }
 .denoised-row { background: #f0fdf4; border-radius: 6px; padding: 6px 8px; }
+
+/* 発話の区切り方（VAD）。プリセット + 詳細スライダー */
+.vad-note { font-size: 12px; color: var(--muted); flex: 1; min-width: 180px; }
+.vad-details { margin: 2px 0 4px; }
+.vad-details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 4px 0 4px 56px;
+  list-style-position: inside;
+}
+.vad-details > summary:hover { color: var(--text); }
+.vad-custom-badge {
+  background: #fef3c7; color: #92400e;
+  font-size: 10px; border-radius: 10px; padding: 1px 7px; margin-left: 4px;
+}
+.vad-body {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 4px 0 0 56px;
+  background: #fafbfc;
+  /* 説明文が横に伸びすぎると読みにくいので幅を抑える */
+  max-width: 680px;
+}
+.vad-body .hint { color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.6; }
+.vad-body .hint strong { color: var(--text); }
+.vad-ctl { display: block; margin-bottom: 14px; }
+.vad-ctl-name { display: block; font-size: 12px; margin-bottom: 4px; }
+.vad-ctl-name b { color: var(--accent); font-size: 13px; }
+.vad-ctl input[type="range"] { width: 100%; max-width: 320px; display: block; }
+.vad-ctl-help {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin-top: 3px;
+}
+.vad-ctl-help strong { color: var(--text); }
+.vad-actions { text-align: right; }
+.vad-reset.ghost {
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--border); padding: 4px 10px; font-size: 11px;
+}
+.vad-reset.ghost:hover { background: #f1f5f9; color: var(--text); }
 
 .diarize-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; flex-wrap: wrap; }
 .diarize-row .chk { font-size: 13px; display: flex; align-items: center; gap: 5px; cursor: pointer; }
@@ -220,8 +274,20 @@ button:disabled { background: #9ca3af; cursor: default; }
 .reassign-btn:hover { background: #15803d; }
 .reassign-status { font-size: 12px; color: var(--muted); }
 
-.seg-play { background: #eef2ff; color: var(--accent); padding: 2px 8px; font-size: 11px; flex-shrink: 0; }
+.seg-play {
+  background: #eef2ff; color: var(--accent);
+  padding: 2px 8px; font-size: 11px; flex-shrink: 0;
+  /* ▶ と ■ で字幅が変わってもテキスト位置がずれないよう固定幅 */
+  width: 28px; text-align: center; align-self: flex-start;
+}
 .seg-play:hover { background: #e0e7ff; }
+.seg-play.is-playing { background: var(--accent); color: #fff; }
+.seg-play.is-playing:hover { background: var(--accent-hover); }
+
+/* 結果欄の全体再生プレイヤー */
+.result-audio-row { display: flex; align-items: center; gap: 10px; padding: 4px 0 10px; flex-wrap: wrap; }
+.result-audio-row .audio-result { height: 32px; flex: 1; min-width: 240px; }
+.result-audio-note { font-size: 11px; color: var(--muted); }
 .seg-spk {
   font-size: 11px; font-weight: 600;
   border: 1px solid var(--border); border-radius: 10px; padding: 1px 6px;
@@ -258,6 +324,15 @@ button:disabled { background: #9ca3af; cursor: default; }
 .toolbar button { background: #eef2ff; color: var(--accent); padding: 5px 10px; font-size: 12px; }
 .toolbar button:hover { background: #e0e7ff; }
 .toolbar .meta { font-size: 12px; color: var(--muted); }
+.toolbar .merge-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
 
 .segments { max-height: 360px; overflow-y: auto; }
 .seg { display: flex; gap: 10px; padding: 4px 0; font-size: 14px; line-height: 1.5; border-bottom: 1px solid #f0f1f3; }
