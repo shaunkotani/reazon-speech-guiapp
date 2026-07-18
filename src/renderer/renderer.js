@@ -67,18 +67,32 @@ downloadBtn.addEventListener('click', async () => {
 // 実測の根拠は HANDOFF.md「発話区間の分割」を参照。
 const VAD_PRESETS = {
   standard: {
-    maxSpeechDuration: 12, minSilenceDuration: 0.35, threshold: 0.5,
-    note: '一般的な音声向け。迷ったらこれ',
+    maxSpeechDuration: 6, minSilenceDuration: 0.2, minSpeechDuration: 0.15, threshold: 0.5,
+    overlapAware: false, overlapSpeakers: 2,
+    note: '精度と文のつながりのバランスを取った設定',
   },
   conversation: {
-    maxSpeechDuration: 6, minSilenceDuration: 0.2, threshold: 0.35,
-    note: '相槌が重なって無音が少ない音声向け。細かく区切って取りこぼしを防ぎます',
+    maxSpeechDuration: 3, minSilenceDuration: 0.1, minSpeechDuration: 0.2, threshold: 0.7,
+    overlapAware: true, overlapSpeakers: 2,
+    note: '同時発話を再解析し、3秒単位で細かく認識する設定（処理時間は長め）',
   },
   lecture: {
-    maxSpeechDuration: 15, minSilenceDuration: 0.6, threshold: 0.5,
-    note: '一人が続けて話す音声向け。文が途中で切れにくくなります',
+    maxSpeechDuration: 8, minSilenceDuration: 0.35, minSpeechDuration: 0.15, threshold: 0.45,
+    overlapAware: false, overlapSpeakers: 2,
+    note: '一人の長めの発話を保ちつつ、認識区間は長くしすぎない設定',
   },
 };
+
+// 保存済みプリセットは settings.json に置き、追加済みの全ジョブへ即時反映する。
+let customVadPresets = [];
+const vadPresetViews = new Set();
+function setCustomVadPresets(values) {
+  customVadPresets = Array.isArray(values) ? values : [];
+  vadPresetViews.forEach((view) => view.render());
+}
+const vadPresetsReady = window.api.getVadPresets()
+  .then(setCustomVadPresets)
+  .catch(() => { customVadPresets = []; });
 
 // ---- 認識設定（高精度モード・用語辞書） ----
 const hwText = $('#hotwords-text');
@@ -179,6 +193,28 @@ dropzone.addEventListener('drop', (e) => {
 });
 
 // ---- ジョブ（取込 → 設定/プレビュー → 文字起こし） ----
+async function createAudioObjectUrl(filePath) {
+  const { data, type } = await window.api.readMedia(filePath);
+  return URL.createObjectURL(new Blob([data], { type }));
+}
+
+function replaceAudioObjectUrl(audio, job, key, objectUrl) {
+  if (job[key]) URL.revokeObjectURL(job[key]);
+  job[key] = objectUrl;
+  audio.src = objectUrl;
+  audio.load();
+}
+
+function clearAudioObjectUrl(audio, job, key) {
+  audio.pause();
+  audio.removeAttribute('src');
+  audio.load();
+  if (job[key]) {
+    URL.revokeObjectURL(job[key]);
+    job[key] = null;
+  }
+}
+
 function addJob(filePath) {
   const jobId = ++jobSeq;
   const node = jobTpl.content.cloneNode(true);
@@ -187,6 +223,7 @@ function addJob(filePath) {
   el.querySelector('.job-status').textContent = '準備完了';
   jobsEl.prepend(el);
   jobs.set(jobId, { el, filePath, result: null });
+  const job = jobs.get(jobId);
 
   const audioOriginal = el.querySelector('.audio-original');
   const origStatus = el.querySelector('.orig-status');
@@ -201,7 +238,8 @@ function addJob(filePath) {
     origStatus.textContent = '読み込み中…';
     try {
       const r = await window.api.preview(filePath, ++previewSeq, 0);
-      audioOriginal.src = window.api.mediaUrl(r.wavPath) + `?t=${Date.now()}`;
+      const objectUrl = await createAudioObjectUrl(r.wavPath);
+      replaceAudioObjectUrl(audioOriginal, job, '_originalPreviewUrl', objectUrl);
       origStatus.textContent = '';
     } catch (e) {
       origStatus.textContent = `読み込み失敗: ${e.message}`;
@@ -210,7 +248,7 @@ function addJob(filePath) {
 
   // ノイズ除去の強さは「なし/弱/中/強」のセグメントボタンで選ぶ（ネイティブ
   // <select> のポップアップに依存しないので、どの状態でも必ず切り替えられる）。
-  let denoiseStrength = 0.8; // 既定「中」（HTML の is-active と一致）
+  let denoiseStrength = 0;   // 既定「なし」（HTML の is-active と一致）
   let previewReq = 0;        // このジョブの最新プレビュー要求ID（古い応答を捨てる）
 
   function setDenoise(v) {
@@ -218,12 +256,10 @@ function addJob(filePath) {
     segOpts.forEach((b) => b.classList.toggle('is-active', parseFloat(b.dataset.value) === v));
     // 別強度で作った「除去後」プレビューは無効 → 破棄して、その強度で再プレビューできる状態に戻す
     previewReq++;
-    audioDenoised.pause();
-    audioDenoised.removeAttribute('src');
-    audioDenoised.load();
+    clearAudioObjectUrl(audioDenoised, job, '_denoisedPreviewUrl');
     denoisedRow.classList.add('hidden');
     previewStatus.textContent = '';
-    previewBtn.disabled = false;
+    previewBtn.disabled = denoiseStrength <= 0;
   }
   segOpts.forEach((b) => b.addEventListener('click', () => setDenoise(parseFloat(b.dataset.value))));
 
@@ -236,13 +272,15 @@ function addJob(filePath) {
     try {
       const r = await window.api.preview(filePath, ++previewSeq, denoiseStrength);
       if (myReq !== previewReq) return; // 生成中に強さが変更された → 古い結果は破棄
-      audioDenoised.src = window.api.mediaUrl(r.wavPath) + `?t=${Date.now()}`;
+      const objectUrl = await createAudioObjectUrl(r.wavPath);
+      if (myReq !== previewReq) { URL.revokeObjectURL(objectUrl); return; }
+      replaceAudioObjectUrl(audioDenoised, job, '_denoisedPreviewUrl', objectUrl);
       denoisedRow.classList.remove('hidden');
       previewStatus.textContent = '生成しました';
     } catch (e) {
       if (myReq === previewReq) previewStatus.textContent = `失敗: ${e.message}`;
     } finally {
-      if (myReq === previewReq) previewBtn.disabled = false;
+      if (myReq === previewReq) previewBtn.disabled = denoiseStrength <= 0;
     }
   });
 
@@ -252,50 +290,161 @@ function addJob(filePath) {
   const vadSeg = Array.from(el.querySelectorAll('.vad-seg .seg-opt'));
   const vadMax = el.querySelector('.vad-max');
   const vadSil = el.querySelector('.vad-sil');
+  const vadMinSpeech = el.querySelector('.vad-min-speech');
   const vadTh = el.querySelector('.vad-th');
+  const overlapAware = el.querySelector('.overlap-aware');
+  const overlapSpeakers = el.querySelector('.overlap-speakers');
   const vadPresetNote = el.querySelector('.vad-preset-note');
   const vadBadge = el.querySelector('.vad-custom-badge');
+  const savedSelect = el.querySelector('.vad-saved-select');
+  const presetName = el.querySelector('.vad-preset-name');
+  const savePresetBtn = el.querySelector('.vad-save');
+  const deletePresetBtn = el.querySelector('.vad-delete');
+  const savePresetStatus = el.querySelector('.vad-save-status');
 
-  let vadPreset = 'standard';
+  let presetSource = { kind: 'builtin', id: 'standard' };
 
-  function applyPreset(name) {
-    vadPreset = name;
-    const p = VAD_PRESETS[name];
+  function applyPresetValues(p) {
     vadMax.value = p.maxSpeechDuration;
     vadSil.value = p.minSilenceDuration;
+    vadMinSpeech.value = p.minSpeechDuration;
     vadTh.value = p.threshold;
-    vadSeg.forEach((b) => b.classList.toggle('is-active', b.dataset.preset === name));
-    vadPresetNote.textContent = p.note;
+    overlapAware.checked = p.overlapAware;
+    overlapSpeakers.value = String(p.overlapSpeakers);
     syncVadLabels();
+    syncOverlapUi();
     vadBadge.classList.add('hidden');
+  }
+
+  function applyBuiltInPreset(name) {
+    const p = VAD_PRESETS[name];
+    if (!p) return;
+    presetSource = { kind: 'builtin', id: name };
+    applyPresetValues(p);
+    vadSeg.forEach((b) => b.classList.toggle('is-active', b.dataset.preset === name));
+    savedSelect.value = '';
+    presetName.value = '';
+    deletePresetBtn.disabled = true;
+    vadPresetNote.textContent = p.note;
+    savePresetStatus.textContent = '';
+  }
+
+  function applySavedPreset(id) {
+    const p = customVadPresets.find((item) => item.id === id);
+    if (!p) return;
+    presetSource = { kind: 'custom', id: p.id };
+    applyPresetValues(p);
+    vadSeg.forEach((b) => b.classList.remove('is-active'));
+    savedSelect.value = p.id;
+    presetName.value = p.name;
+    deletePresetBtn.disabled = false;
+    vadPresetNote.textContent = `保存した設定「${p.name}」`;
+    savePresetStatus.textContent = '';
   }
 
   function syncVadLabels() {
     el.querySelector('.vad-max-val').textContent = vadMax.value;
     el.querySelector('.vad-sil-val').textContent = Number(vadSil.value).toFixed(2);
+    el.querySelector('.vad-min-speech-val').textContent = Number(vadMinSpeech.value).toFixed(2);
     el.querySelector('.vad-th-val').textContent = Number(vadTh.value).toFixed(2);
+  }
+
+  function syncOverlapUi() {
+    overlapSpeakers.disabled = !overlapAware.checked;
   }
 
   // スライダーを動かしたらプリセットから外れた印を出す（値そのものは保持）
   function markCustom() {
     syncVadLabels();
-    const p = VAD_PRESETS[vadPreset];
-    const same = Number(vadMax.value) === p.maxSpeechDuration
+    const p = presetSource.kind === 'builtin'
+      ? VAD_PRESETS[presetSource.id]
+      : customVadPresets.find((item) => item.id === presetSource.id);
+    const same = !!p && Number(vadMax.value) === p.maxSpeechDuration
       && Number(vadSil.value) === p.minSilenceDuration
-      && Number(vadTh.value) === p.threshold;
+      && Number(vadMinSpeech.value) === p.minSpeechDuration
+      && Number(vadTh.value) === p.threshold
+      && overlapAware.checked === p.overlapAware
+      && Number(overlapSpeakers.value) === p.overlapSpeakers;
     vadBadge.classList.toggle('hidden', same);
   }
 
-  vadSeg.forEach((b) => b.addEventListener('click', () => applyPreset(b.dataset.preset)));
-  [vadMax, vadSil, vadTh].forEach((s) => s.addEventListener('input', markCustom));
-  el.querySelector('.vad-reset').addEventListener('click', () => applyPreset(vadPreset));
-  applyPreset('standard');
+  function renderSavedPresets() {
+    const selected = presetSource.kind === 'custom' ? presetSource.id : '';
+    const placeholder = new Option('保存済みプリセット', '');
+    placeholder.disabled = true;
+    savedSelect.replaceChildren(placeholder);
+    customVadPresets.forEach((p) => savedSelect.add(new Option(p.name, p.id)));
+    savedSelect.disabled = customVadPresets.length === 0;
+    savedSelect.value = customVadPresets.some((p) => p.id === selected) ? selected : '';
+  }
+
+  const presetView = { render: renderSavedPresets };
+  vadPresetViews.add(presetView);
+  vadPresetsReady.then(renderSavedPresets);
+
+  vadSeg.forEach((b) => b.addEventListener('click', () => applyBuiltInPreset(b.dataset.preset)));
+  savedSelect.addEventListener('change', () => {
+    if (savedSelect.value) applySavedPreset(savedSelect.value);
+  });
+  [vadMax, vadSil, vadMinSpeech, vadTh].forEach((s) => s.addEventListener('input', markCustom));
+  overlapAware.addEventListener('change', () => { syncOverlapUi(); markCustom(); });
+  overlapSpeakers.addEventListener('change', markCustom);
+  el.querySelector('.vad-reset').addEventListener('click', () => {
+    if (presetSource.kind === 'custom') applySavedPreset(presetSource.id);
+    else applyBuiltInPreset(presetSource.id);
+  });
+
+  savePresetBtn.addEventListener('click', async () => {
+    const name = presetName.value.trim();
+    if (!name) { savePresetStatus.textContent = '名前を入力してください'; presetName.focus(); return; }
+    savePresetBtn.disabled = true;
+    savePresetStatus.textContent = '保存中…';
+    try {
+      const res = await window.api.saveVadPreset({
+        id: presetSource.kind === 'custom' ? presetSource.id : undefined,
+        name,
+        maxSpeechDuration: Number(vadMax.value),
+        minSilenceDuration: Number(vadSil.value),
+        minSpeechDuration: Number(vadMinSpeech.value),
+        threshold: Number(vadTh.value),
+        overlapAware: overlapAware.checked,
+        overlapSpeakers: Number(overlapSpeakers.value),
+      });
+      setCustomVadPresets(res.presets);
+      applySavedPreset(res.preset.id);
+      savePresetStatus.textContent = '保存しました';
+    } catch (e) {
+      savePresetStatus.textContent = `保存失敗: ${e.message}`;
+    } finally {
+      savePresetBtn.disabled = false;
+    }
+  });
+
+  deletePresetBtn.addEventListener('click', async () => {
+    if (presetSource.kind !== 'custom') return;
+    const p = customVadPresets.find((item) => item.id === presetSource.id);
+    if (!p || !confirm(`プリセット「${p.name}」を削除しますか？`)) return;
+    deletePresetBtn.disabled = true;
+    try {
+      const res = await window.api.deleteVadPreset(p.id);
+      setCustomVadPresets(res.presets);
+      applyBuiltInPreset('standard');
+    } catch (e) {
+      savePresetStatus.textContent = `削除失敗: ${e.message}`;
+      deletePresetBtn.disabled = false;
+    }
+  });
+
+  applyBuiltInPreset('standard');
 
   const vadOptions = () => ({
-    preset: vadPreset,
+    preset: presetSource.kind === 'builtin' ? presetSource.id : 'custom',
     maxSpeechDuration: Number(vadMax.value),
     minSilenceDuration: Number(vadSil.value),
+    minSpeechDuration: Number(vadMinSpeech.value),
     threshold: Number(vadTh.value),
+    overlapAware: overlapAware.checked,
+    overlapSpeakers: Number(overlapSpeakers.value),
   });
 
   // 文字起こし開始
@@ -475,10 +624,8 @@ function onJobDone(jobId, result) {
 async function loadResultAudio(job) {
   const audio = job.el.querySelector('.audio-result');
   try {
-    const { data, type } = await window.api.readMedia(job.result.filePath);
-    if (job._audioObjectUrl) URL.revokeObjectURL(job._audioObjectUrl);
-    job._audioObjectUrl = URL.createObjectURL(new Blob([data], { type }));
-    audio.src = job._audioObjectUrl;
+    const objectUrl = await createAudioObjectUrl(job.result.filePath);
+    replaceAudioObjectUrl(audio, job, '_audioObjectUrl', objectUrl);
   } catch (e) {
     // 取得に失敗したら直接 URL で読む（再生は可能・シークは不安定）
     console.warn('media read failed, falling back to direct URL', e);
@@ -518,6 +665,11 @@ function renderResult(jobId) {
   const el = job.el;
 
   let meta = `長さ ${fmtTime(result.duration)} ・ ${result.segments.length} 区間`;
+  if (result.overlap && result.overlap.recovered > 0) {
+    meta += ` ・ 重なり補正 ${result.overlap.recovered} 区間`;
+  } else if (result.overlap && result.overlap.error) {
+    meta += ' ・ 重なり補正失敗';
+  }
   if (job.tagging) {
     const used = new Set(result.segments.map((s) => s.speaker).filter((x) => x != null && x >= 0));
     meta += ` ・ 話者 ${used.size} 人`;
@@ -538,6 +690,7 @@ function renderResult(jobId) {
   result.segments.forEach((s, idx) => {
     const row = document.createElement('div');
     row.className = 'seg';
+    if (s.overlapRecovered) row.classList.add('overlap-recovered');
 
     // ▶ は常時表示（話者タグ付け中でなくても区間を聴き返せるように）
     const play = document.createElement('button');
@@ -558,6 +711,13 @@ function renderResult(jobId) {
     txt.className = 'txt';
     txt.textContent = s.text;
     row.appendChild(txt);
+    if (s.overlapRecovered) {
+      const badge = document.createElement('span');
+      badge.className = 'overlap-badge';
+      badge.textContent = '重なり補正';
+      badge.title = '話者の重なりを検出し、境界を変えて再認識した区間です';
+      row.appendChild(badge);
+    }
     segEl.appendChild(row);
   });
 }

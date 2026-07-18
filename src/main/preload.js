@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld('api', {
   setHotwords: (payload) => ipcRenderer.invoke('hotwords:set', payload),
   // 高精度モード（beam search）ON/OFF -> { ok, highAccuracy }
   setHighAccuracy: (on) => ipcRenderer.invoke('accuracy:set', on),
+  // ユーザー定義の区切り設定プリセット
+  getVadPresets: () => ipcRenderer.invoke('vad-presets:get'),
+  saveVadPreset: (preset) => ipcRenderer.invoke('vad-presets:save', preset),
+  deleteVadPreset: (id) => ipcRenderer.invoke('vad-presets:delete', id),
 
   // ファイル選択（ダイアログ / ドロップ）
   openFiles: () => ipcRenderer.invoke('dialog:openFiles'),
@@ -26,7 +30,8 @@ contextBridge.exposeInMainWorld('api', {
   mediaUrl,
 
   // 文字起こし（opts: { denoiseStrength:0..1, diarize:bool, numSpeakers:int,
-  //   vad:{ preset, threshold, minSilenceDuration, maxSpeechDuration } }）
+  //   vad:{ preset, threshold, minSilenceDuration, minSpeechDuration, maxSpeechDuration,
+  //         overlapAware, overlapSpeakers } }）
   transcribe: (filePath, jobId, opts) =>
     ipcRenderer.invoke('transcribe:file', filePath, jobId, opts),
   cancelTranscribe: (jobId) => ipcRenderer.invoke('transcribe:cancel', jobId),

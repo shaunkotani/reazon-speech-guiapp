@@ -13,6 +13,11 @@ function mediaUrl(absPath) {
 }
 
 const noop = () => {};
+let savedVadPresets = [{
+  id: 'short-replies', name: '短い相槌',
+  maxSpeechDuration: 3, minSilenceDuration: 0.05, minSpeechDuration: 0.05, threshold: 0.65,
+  overlapAware: true, overlapSpeakers: 2,
+}];
 const RESULT = {
   segments: [
     { start: 0.65, end: 1.99, text: 'はいもしもし' },
@@ -33,10 +38,24 @@ contextBridge.exposeInMainWorld('api', {
   getHotwords: async () => ({ text: '', score: 2, enabled: true, highAccuracy: false }),
   setHotwords: async () => ({ ok: true, count: 0 }),
   setHighAccuracy: async () => ({ ok: true, highAccuracy: false }),
+  getVadPresets: async () => savedVadPresets,
+  saveVadPreset: async (value) => {
+    const preset = { ...value, id: value.id || `test-${savedVadPresets.length + 1}` };
+    const index = savedVadPresets.findIndex((p) => p.id === preset.id || p.name === preset.name);
+    if (index >= 0) savedVadPresets[index] = preset; else savedVadPresets.push(preset);
+    return { ok: true, preset, presets: savedVadPresets };
+  },
+  deleteVadPreset: async (id) => {
+    savedVadPresets = savedVadPresets.filter((p) => p.id !== id);
+    return { ok: true, presets: savedVadPresets };
+  },
   openFiles: async () => [TARGET],
   pathForFile: (f) => f.path || TARGET,
   mediaUrl,
-  transcribe: async () => RESULT,
+  transcribe: async (_filePath, _jobId, opts) => {
+    ipcRenderer.send('transcribe-opts', opts);
+    return RESULT;
+  },
   cancelTranscribe: async () => true,
   onTranscribeProgress: noop,
   computeEmbeddings: async () => ({ ok: true, count: RESULT.segments.length }),
@@ -47,7 +66,10 @@ contextBridge.exposeInMainWorld('api', {
     return { wavPath: path.join(SAMPLES, 'test.wav') };
   },
   // 本物と同じく中身を丸ごと返す（Blob 化はレンダラ側の責務）
-  readMedia: async (filePath) => ({ data: require('fs').readFileSync(filePath), type: 'audio/mpeg' }),
+  readMedia: async (filePath) => ({
+    data: require('fs').readFileSync(filePath),
+    type: path.extname(filePath).toLowerCase() === '.wav' ? 'audio/wav' : 'audio/mpeg',
+  }),
   reassignSpeakers: async () => ({ labels: [], speakerCount: 0 }),
   preview: async () => ({ wavPath: path.join(SAMPLES, 'test.wav'), duration: 9 }),
   saveExport: async () => ({ ok: true }),

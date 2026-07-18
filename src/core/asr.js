@@ -209,6 +209,30 @@ function createEmbeddingExtractor(embPath, { numThreads = 1 } = {}) {
 }
 
 /**
+ * pyannote の話者セグメンテーションと埋め込みを組み合わせた話者区間検出器。
+ * 重なった話者は同じ時刻を共有する複数区間として返るため、VAD の補助に使える。
+ */
+function createSpeakerDiarizer(segmentationPath, embeddingPath, {
+  numSpeakers = 2, numThreads = 1, threshold = 0.5,
+} = {}) {
+  const clusters = Number.isInteger(numSpeakers) && numSpeakers >= 2 ? numSpeakers : -1;
+  return new sherpa.OfflineSpeakerDiarization({
+    segmentation: {
+      pyannote: { model: segmentationPath },
+      numThreads, provider: 'cpu', debug: 0,
+    },
+    embedding: {
+      model: embeddingPath,
+      numThreads, provider: 'cpu', debug: 0,
+    },
+    clustering: { numClusters: clusters, threshold },
+    // 短い相槌と短い重畳を落とさず、結合判断は後段の純 JS で行う。
+    minDurationOn: 0,
+    minDurationOff: 0,
+  });
+}
+
+/**
  * 1 区間分のサンプルから話者埋め込みベクトルを抽出する。
  * @returns {Float32Array}
  */
@@ -229,16 +253,17 @@ function extractEmbedding(extractor, samples) {
 // 用途に応じて調整できるようにしている。
 const DEFAULT_VAD = {
   threshold: 0.5,          // 発話と判定する確信度。低いほど小声も拾うがノイズも拾う
-  minSilenceDuration: 0.35, // この長さの無音で区間を区切る。短いほど細かく割れる
-  minSpeechDuration: 0.25,  // これより短い音は発話とみなさない（クリック音などの除去）
-  maxSpeechDuration: 12,    // 無音が来なくてもこの秒数で強制的に区切る
+  minSilenceDuration: 0.2,  // この長さの無音で区間を区切る。短いほど細かく割れる
+  minSpeechDuration: 0.15,  // これより短い音は発話とみなさない（クリック音などの除去）
+  maxSpeechDuration: 6,     // 無音が来なくてもこの秒数で強制的に区切る
 };
 
-// 用途別プリセット。値は samples/ の音声で実測して決めた（HANDOFF.md 参照）。
+// 用途別プリセット。samples/ の会話・独話音声を、認識結果まで通して比較した値。
+// conversation は重なりのある会話を積極的に分割し、lecture は語中分割を抑える。
 const VAD_PRESETS = {
-  standard:     { threshold: 0.5,  minSilenceDuration: 0.35, minSpeechDuration: 0.25, maxSpeechDuration: 12 },
-  conversation: { threshold: 0.35, minSilenceDuration: 0.2,  minSpeechDuration: 0.25, maxSpeechDuration: 6 },
-  lecture:      { threshold: 0.5,  minSilenceDuration: 0.6,  minSpeechDuration: 0.25, maxSpeechDuration: 15 },
+  standard:     { threshold: 0.5,  minSilenceDuration: 0.2,  minSpeechDuration: 0.15, maxSpeechDuration: 6 },
+  conversation: { threshold: 0.7,  minSilenceDuration: 0.1,  minSpeechDuration: 0.2,  maxSpeechDuration: 3 },
+  lecture:      { threshold: 0.45, minSilenceDuration: 0.35, minSpeechDuration: 0.15, maxSpeechDuration: 8 },
 };
 
 // UI や IPC から来た値を安全な範囲に丸める。未指定の項目は標準値で埋める。
@@ -400,6 +425,7 @@ module.exports = {
   createVad,
   createDenoiser,
   createEmbeddingExtractor,
+  createSpeakerDiarizer,
   extractEmbedding,
   clusterEmbeddings,
   collectVadSegments,

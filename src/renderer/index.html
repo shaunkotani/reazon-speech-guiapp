@@ -100,12 +100,12 @@
         <div class="denoise-row">
           <span class="plabel">ノイズ除去</span>
           <div class="denoise-seg" role="radiogroup" aria-label="ノイズ除去の強さ">
-            <button type="button" class="seg-opt" data-value="0">なし</button>
+            <button type="button" class="seg-opt is-active" data-value="0">なし</button>
             <button type="button" class="seg-opt" data-value="0.5">弱</button>
-            <button type="button" class="seg-opt is-active" data-value="0.8">中</button>
+            <button type="button" class="seg-opt" data-value="0.8">中</button>
             <button type="button" class="seg-opt" data-value="1">強</button>
           </div>
-          <button class="preview-btn">除去後をプレビュー</button>
+          <button class="preview-btn" disabled>除去後をプレビュー</button>
           <span class="preview-status"></span>
         </div>
         <div class="preview-row denoised-row hidden">
@@ -121,32 +121,61 @@
             <button type="button" class="seg-opt" data-preset="conversation">会話・電話</button>
             <button type="button" class="seg-opt" data-preset="lecture">講演・朗読</button>
           </div>
+          <select class="vad-saved-select" aria-label="保存済みの区切り設定">
+            <option value="" disabled>保存済みプリセット</option>
+          </select>
           <span class="vad-note vad-preset-note"></span>
         </div>
         <details class="vad-details">
           <summary>区切りの詳細設定 <span class="vad-custom-badge hidden">カスタム</span></summary>
           <div class="vad-body">
             <p class="hint">
-              このアプリは音声を「無音」で区切ってから1区間ずつ認識します。認識モデルは
+              このアプリは音声を区間に分けてから1区間ずつ認識します。認識モデルは
               <strong>短い発話向けに作られている</strong>ため、1区間が長すぎると、その区間の文字が
               まとめて数文字に潰れて消えます。相槌が重なる電話・会議の音声で
               「ほんの一言しか出てこない」時は、ここを短くしてください。
             </p>
+            <div class="overlap-ctl">
+              <label class="chk">
+                <input type="checkbox" class="overlap-aware" />
+                重なり音声を再解析
+              </label>
+              <label>
+                想定話者数
+                <select class="overlap-speakers" disabled>
+                  <option value="2" selected>2人</option>
+                  <option value="3">3人</option>
+                  <option value="4">4人</option>
+                </select>
+              </label>
+              <span class="vad-ctl-help">話者交代と同時発話を検出し、問題のある区間だけ境界を変えて複数回認識します。処理時間は長くなります。</span>
+            </div>
             <label class="vad-ctl">
-              <span class="vad-ctl-name">1区間の最大長 <b class="vad-max-val">12</b> 秒</span>
-              <input type="range" class="vad-max" min="3" max="20" step="1" value="12" />
+              <span class="vad-ctl-name">1区間の最大長 <b class="vad-max-val">6</b> 秒</span>
+              <input type="range" class="vad-max" min="3" max="20" step="1" value="6" />
               <span class="vad-ctl-help">無音が来なくてもこの秒数で強制的に区切ります。<strong>短くすると取りこぼしが減り</strong>、長くすると文が途中で切れにくくなります。会話音声で結果が極端に短い時は、まずこれを下げてください。</span>
             </label>
             <label class="vad-ctl">
-              <span class="vad-ctl-name">区切る無音の長さ <b class="vad-sil-val">0.35</b> 秒</span>
-              <input type="range" class="vad-sil" min="0.1" max="1" step="0.05" value="0.35" />
-              <span class="vad-ctl-help">この長さの無音があれば区間を分けます。<strong>短くすると細かく分かれ</strong>、話者の入れ替わりを捉えやすくなりますが、文の途中で切れることがあります。</span>
+              <span class="vad-ctl-name">区切る無音の長さ <b class="vad-sil-val">0.20</b> 秒</span>
+              <input type="range" class="vad-sil" min="0.05" max="1" step="0.05" value="0.2" />
+              <span class="vad-ctl-help">この長さの無音があれば区間を分けます。最短は0.05秒です。<strong>短くすると細かく分かれますが、発話そのものの検出感度は上がりません。</strong>短くしすぎると語の途中で切れることがあります。</span>
             </label>
             <label class="vad-ctl">
-              <span class="vad-ctl-name">音声の検出感度 <b class="vad-th-val">0.50</b></span>
-              <input type="range" class="vad-th" min="0.1" max="0.9" step="0.05" value="0.5" />
-              <span class="vad-ctl-help">小さいほど小さな声も発話として拾いますが、ノイズも拾いやすくなります。声が小さくて認識されない時に下げてください。</span>
+              <span class="vad-ctl-name">拾う発話の最小長 <b class="vad-min-speech-val">0.15</b> 秒</span>
+              <input type="range" class="vad-min-speech" min="0.05" max="0.5" step="0.05" value="0.15" />
+              <span class="vad-ctl-help">これより短い音を発話として扱いません。<strong>短くすると「あ」「はい」などの短い相槌を拾いやすくなります</strong>が、物音も拾いやすくなります。</span>
             </label>
+            <label class="vad-ctl">
+              <span class="vad-ctl-name">発話判定の厳しさ <b class="vad-th-val">0.50</b></span>
+              <input type="range" class="vad-th" min="0.1" max="0.9" step="0.05" value="0.5" />
+              <span class="vad-ctl-help">大きいほど強い音声だけを発話と判定します。小さい声が認識されない時は下げてください（下げすぎるとノイズも拾います）。</span>
+            </label>
+            <div class="vad-preset-save">
+              <input type="text" class="vad-preset-name" maxlength="40" placeholder="カスタムプリセット名" />
+              <button type="button" class="vad-save ghost">現在の設定を保存</button>
+              <button type="button" class="vad-delete ghost" disabled>削除</button>
+              <span class="vad-save-status"></span>
+            </div>
             <div class="vad-actions">
               <button type="button" class="vad-reset ghost">プリセットに戻す</button>
             </div>

@@ -5,7 +5,7 @@
 // 200 全体返しでも、preload="metadata" の <audio> をシークした瞬間に
 // MEDIA_ERR_NETWORK / PIPELINE_ERROR_READ になる）。
 // そのため renderer 側は、シークが必要な用途（結果画面の全体プレイヤーと
-// 区間の頭出し再生）では、この URL を fetch で丸ごと取得して Blob URL に
+// 区間の頭出し再生やプレビュー）では、IPC media:read で丸ごと取得して Blob URL に
 // 変換してから <audio> に渡す（scripts/test-renderer-playback.js で検証）。
 // ここは「全体を一度で読み切る」だけの単純な配信に徹する。
 //

@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { randomUUID } = require('crypto');
 const { fork, spawn } = require('child_process');
 const { app, BrowserWindow, ipcMain, dialog, protocol, shell } = require('electron');
 
@@ -8,6 +9,7 @@ const { autoUpdater } = require('electron-updater');
 const modelManager = require('./modelManager');
 const exporters = require('../shared/export');
 const { assignByReferences, UNKNOWN_THRESHOLD } = require('../shared/cluster');
+const overlapTools = require('../shared/overlap');
 const { registerMediaProtocol, MEDIA_MIME } = require('./mediaProtocol');
 
 // <audio> から元音声/除去後音声を再生するためのローカルメディア配信スキーム
@@ -63,6 +65,37 @@ function readSettings() {
 function writeSettings(s) {
   fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
   fs.writeFileSync(settingsPath(), JSON.stringify(s, null, 2), 'utf8');
+}
+
+// ---- ユーザー定義 VAD プリセットの永続化 ----
+const MAX_CUSTOM_VAD_PRESETS = 20;
+const clampNumber = (value, min, max, fallback) =>
+  (typeof value === 'number' && isFinite(value)) ? Math.min(max, Math.max(min, value)) : fallback;
+
+function normalizeCustomVadPreset(value, fallbackId = '') {
+  const p = value && typeof value === 'object' ? value : {};
+  const name = String(p.name || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+  if (!name) return null;
+  const candidateId = String(p.id || fallbackId || '');
+  const id = /^[a-zA-Z0-9_-]{1,80}$/.test(candidateId) ? candidateId : randomUUID();
+  return {
+    id,
+    name,
+    maxSpeechDuration: clampNumber(p.maxSpeechDuration, 3, 20, 6),
+    minSilenceDuration: clampNumber(p.minSilenceDuration, 0.05, 1, 0.2),
+    minSpeechDuration: clampNumber(p.minSpeechDuration, 0.05, 0.5, 0.15),
+    threshold: clampNumber(p.threshold, 0.1, 0.9, 0.5),
+    overlapAware: p.overlapAware === true,
+    overlapSpeakers: Math.round(clampNumber(p.overlapSpeakers, 2, 4, 2)),
+  };
+}
+
+function customVadPresets() {
+  const values = readSettings().vadPresets;
+  if (!Array.isArray(values)) return [];
+  return values.slice(0, MAX_CUSTOM_VAD_PRESETS)
+    .map((p, i) => normalizeCustomVadPreset(p, `legacy-${i + 1}`))
+    .filter(Boolean);
 }
 const DEFAULT_HOTWORDS_SCORE = 2.0;
 // 現在の認識設定（辞書＋高精度モード）。辞書に有効な語が無ければ file:null。
@@ -121,10 +154,10 @@ function ensurePool() {
   if (poolReady) return poolReady;
   const { baseDir, ready } = resolveModels();
   if (!ready) return Promise.reject(new Error('モデルが未取得です。先にダウンロードしてください。'));
-  const { modelDir, vadPath, denoiserPath, embPath } = modelManager.pathsFor(baseDir);
+  const { modelDir, vadPath, denoiserPath, embPath, segmentationPath } = modelManager.pathsFor(baseDir);
   const rs = currentRecognizerSettings();
   pool = Array.from({ length: POOL_SIZE }, () =>
-    spawnWorker({ modelDir, vadPath, denoiserPath, embPath,
+    spawnWorker({ modelDir, vadPath, denoiserPath, embPath, segmentationPath,
       hotwordsFile: rs.file, hotwordsScore: rs.score, beamSearch: rs.highAccuracy }));
   poolReady = Promise.all(pool.map((w) => w.ready)).catch((e) => { destroyPool(); throw e; });
   return poolReady;
@@ -182,6 +215,34 @@ ipcMain.handle('accuracy:set', (event, highAccuracy) => {
   writeSettings(s);
   destroyPool();
   return { ok: true, highAccuracy: s.highAccuracy };
+});
+
+// 区切り設定のユーザー定義プリセット。settings.json に最大20件保存する。
+ipcMain.handle('vad-presets:get', () => customVadPresets());
+ipcMain.handle('vad-presets:save', (event, value) => {
+  const incoming = normalizeCustomVadPreset(value);
+  if (!incoming) throw new Error('プリセット名を入力してください');
+  const s = readSettings();
+  const presets = customVadPresets();
+  let index = presets.findIndex((p) => p.id === incoming.id);
+  if (index < 0) index = presets.findIndex((p) => p.name.toLocaleLowerCase() === incoming.name.toLocaleLowerCase());
+  if (index >= 0) {
+    incoming.id = presets[index].id;
+    presets[index] = incoming;
+  } else {
+    if (presets.length >= MAX_CUSTOM_VAD_PRESETS) throw new Error(`保存できるプリセットは${MAX_CUSTOM_VAD_PRESETS}件までです`);
+    presets.push(incoming);
+  }
+  s.vadPresets = presets;
+  writeSettings(s);
+  return { ok: true, preset: incoming, presets };
+});
+ipcMain.handle('vad-presets:delete', (event, id) => {
+  const s = readSettings();
+  const presets = customVadPresets().filter((p) => p.id !== String(id || ''));
+  s.vadPresets = presets;
+  writeSettings(s);
+  return { ok: true, presets };
 });
 
 ipcMain.handle('dialog:openFiles', async () => {
@@ -275,14 +336,28 @@ ipcMain.handle('transcribe:file', async (event, filePath, jobId, opts = {}) => {
   const sendProgress = (ratio) => mainWindow && mainWindow.webContents.send('transcribe:progress', { jobId, ratio });
 
   try {
-    // Stage A: 1 ワーカーでデコード+ノイズ除去+VAD → 共有 PCM と区間境界
+    // Stage A: 1 ワーカーでデコード+重なり検出+ノイズ除去+VAD → 共有 PCM と区間境界
     sendProgress(0.02);
+    const vadOpts = opts.vad || {};
+    const overlapOpts = {
+      enabled: vadOpts.overlapAware === true,
+      numSpeakers: Number.isInteger(vadOpts.overlapSpeakers)
+        ? Math.min(4, Math.max(2, vadOpts.overlapSpeakers)) : 2,
+    };
     const prep = await rpc(pool[0], 'prepare', {
       filePath, denoiseStrength: opts.denoiseStrength || 0, outPath: pcmPath,
-      vad: opts.vad || {}, // 発話検出の設定（未指定なら core の標準値）
+      vad: vadOpts, // 発話検出の設定（未指定なら core の標準値）
+      overlap: overlapOpts,
     });
     checkCancel(jobId);
-    const segs = prep.segments;
+    const maxDuration = (typeof vadOpts.maxSpeechDuration === 'number' && isFinite(vadOpts.maxSpeechDuration))
+      ? Math.min(30, Math.max(2, vadOpts.maxSpeechDuration)) : 6;
+    const recognitionPlan = overlapTools.buildRecognitionItems(
+      prep.segments,
+      prep.speakerSegments || [],
+      { enabled: overlapOpts.enabled, maxDuration },
+    );
+    const segs = recognitionPlan.items;
     const total = segs.length;
     if (total === 0) {
       return { segments: [], text: '', duration: prep.duration, filePath, name: path.basename(filePath), jobId };
@@ -298,17 +373,24 @@ ipcMain.handle('transcribe:file', async (event, filePath, jobId, opts = {}) => {
       return rpc(pool[w], 'processBatch', { pcmPath, items, wantEmbedding: false }, (ev) => {
         if (ev.kind === 'seg') { done += ev.n; sendProgress(0.05 + 0.9 * (done / total)); }
       }).then((res) => {
-        for (const r of res) partial[r.idx] = { start: segs[r.idx].start, end: segs[r.idx].end, text: r.text };
+        for (const r of res) partial[r.idx] = { ...segs[r.idx], text: r.text };
       });
     }));
     checkCancel(jobId);
 
-    const ordered = partial.filter((x) => x && x.text);
+    const finalized = overlapTools.finalizeRecognition(partial.filter(Boolean));
+    const ordered = finalized.segments;
     sendProgress(1);
     return {
       segments: ordered,
       text: ordered.map((s) => s.text).join('\n'),
       duration: prep.duration,
+      overlap: {
+        enabled: overlapOpts.enabled,
+        detected: recognitionPlan.overlapIntervals.length,
+        recovered: finalized.recoveredGroups,
+        error: prep.overlapError || '',
+      },
       filePath, name: path.basename(filePath), jobId,
     };
   } finally {

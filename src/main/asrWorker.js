@@ -7,10 +7,10 @@
 // {type:'event', rid, ...} を送り、完了で {type:'response', rid, result} を返す。
 const core = require('../core/asr');
 
-let ctx = null;          // { recognizer, vad, vadPath, vadKey, denoiser, embedder }
+let ctx = null;          // recognizer / VAD / denoiser / embedding / lazy diarizer
 let pcmCache = null;     // { path, samples } 直近に読んだ PCM をキャッシュ
 
-function init({ modelDir, vadPath, denoiserPath, embPath, hotwordsFile, hotwordsScore, beamSearch }) {
+function init({ modelDir, vadPath, denoiserPath, embPath, segmentationPath, hotwordsFile, hotwordsScore, beamSearch }) {
   ctx = {
     // hotwordsFile があれば core 側で modified_beam_search + 辞書に切り替わる。
     // 辞書が無くても beamSearch=true なら高精度モード（beam search）で認識する。
@@ -20,6 +20,10 @@ function init({ modelDir, vadPath, denoiserPath, embPath, hotwordsFile, hotwords
     vadKey: JSON.stringify(core.normalizeVadOptions({})),
     denoiser: denoiserPath ? core.createDenoiser(denoiserPath) : null,
     embedder: embPath ? core.createEmbeddingExtractor(embPath) : null,
+    embPath,
+    segmentationPath,
+    diarizer: null,
+    diarizerKey: '',
   };
 }
 
@@ -41,18 +45,54 @@ function loadPcm(pcmPath) {
   return samples;
 }
 
+// pyannote は会話向けジョブでだけ使う。全プールで常時ロードするとメモリを
+// 余分に消費するため、prepare を担当したワーカーに遅延生成する。
+function diarizerFor(numSpeakers) {
+  if (!ctx.segmentationPath || !ctx.embPath) return null;
+  const n = Number.isInteger(numSpeakers) ? Math.min(4, Math.max(2, numSpeakers)) : 2;
+  const key = String(n);
+  if (!ctx.diarizer || ctx.diarizerKey !== key) {
+    ctx.diarizer = core.createSpeakerDiarizer(ctx.segmentationPath, ctx.embPath, { numSpeakers: n });
+    ctx.diarizerKey = key;
+  }
+  return ctx.diarizer;
+}
+
 // ---- 各オペレーション ----
 const OPS = {
-  // デコード+ノイズ除去 → 一時 WAV 保存 → VAD 区間境界を返す
-  async prepare({ filePath, denoiseStrength, outPath, vad }) {
-    let samples = await core.decodeToPcm(filePath);
+  // 原音で重なり検出 → ノイズ除去 → 共有 PCM 保存 → VAD/話者区間境界を返す
+  async prepare({ filePath, denoiseStrength, outPath, vad, overlap }) {
+    const rawSamples = await core.decodeToPcm(filePath);
+    let speakerSegments = [];
+    let overlapError = '';
+    if (overlap && overlap.enabled) {
+      try {
+        const diarizer = diarizerFor(overlap.numSpeakers);
+        if (diarizer) {
+          speakerSegments = diarizer.process(rawSamples).map((s) => ({
+            start: s.start, end: s.end, speaker: s.speaker,
+          }));
+        } else overlapError = '重なり検出モデルが見つかりません';
+      } catch (e) {
+        // 重なり補正だけを諦め、通常 VAD の文字起こしは継続する。
+        overlapError = e.message || String(e);
+      }
+    }
+
+    let samples = rawSamples;
     if (ctx.denoiser && denoiseStrength > 0) {
       samples = core.denoisePcm(ctx.denoiser, samples, denoiseStrength);
     }
     const duration = samples.length / core.SAMPLE_RATE;
     core.writePcmRaw(samples, outPath); // 共有用 raw float32
     const segs = core.collectVadSegments(samples, vadFor(vad));
-    return { pcmPath: outPath, duration, segments: segs.map((s) => ({ start: s.start, end: s.end })) };
+    return {
+      pcmPath: outPath,
+      duration,
+      segments: segs.map((s) => ({ start: s.start, end: s.end })),
+      speakerSegments,
+      overlapError,
+    };
   },
 
   // 割り当てられた区間を認識（＋必要なら埋め込み抽出）。区間ごとに進捗イベント。

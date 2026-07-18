@@ -8,8 +8,9 @@
 
 - 音声/動画ファイルをドラッグ＆ドロップ → 文字起こし
 - 取り込んだ**元音声のプレビュー再生**
-- **ノイズ除去**（GTCRN）: 強度を なし/弱/中/強 から選択、**除去後のプレビュー再生**も可能
-- VAD で発話区間に分割し、区間ごとのタイムスタンプを付与
+- **ノイズ除去**（GTCRN）: 既定は「なし」。弱/中/強を選び、**除去後のプレビュー再生**も可能
+- VAD で発話区間に分割し、区間ごとのタイムスタンプを付与。用途別プリセットに加え、調整した設定を名前付きで保存可能
+- **重なり音声の再解析**: pyannote で同時発話を検出し、問題区間だけ話者境界と複数の時間窓で再認識
 - **高精度モード**: beam search 復号で認識精度を底上げ（処理速度はやや低下）。辞書とは独立に ON/OFF 可能
 - **用語辞書（ホットワード）**: 固有名詞・専門用語を登録すると優先認識（内部で高精度モードを自動有効化）
 - 進捗バーに**推定残り時間**を表示
@@ -26,9 +27,9 @@
 | 推論 | sherpa-onnx-node（ネイティブ addon） |
 | モデル | reazonspeech-k2-v2（Zipformer transducer, int8, 約150MB） |
 | 音声デコード | ffmpeg-static（任意フォーマット → 16kHz mono） |
-| 発話分割 | Silero VAD |
+| 発話分割 | Silero VAD + pyannote segmentation（会話の重なり補正） |
 | ノイズ除去 | GTCRN（gtcrn_simple.onnx, 約0.5MB） |
-| 音声プレビュー | app-media カスタムプロトコル経由で `<audio>` 再生 |
+| 音声プレビュー | IPCで読み込んだBlob URLを `<audio>` で再生 |
 
 ```
 src/
@@ -38,6 +39,7 @@ src/
   main/modelManager.js モデルの所在解決・初回ダウンロード
   renderer/            UI（HTML/CSS/JS）
   shared/export.js     TXT/SRT/VTT/JSON 整形
+  shared/overlap.js    重なり区間の候補生成・合意選択・統合
 scripts/test-pipeline.js  CLI 動作確認
 ```
 
@@ -48,6 +50,8 @@ npm install
 # dev 実行時はリポジトリ直下 ./models があればそれを使う
 npm start          # アプリ起動
 npm run test:cli samples/natural.wav   # CLI で文字起こし確認
+npm run test:overlap                    # 重なり補正の純JS回帰テスト
+npm run test:renderer                   # プリセット保存・音声再生の画面回帰テスト
 ```
 
 ### モデルの取得（開発時）

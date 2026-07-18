@@ -36,7 +36,9 @@ app.whenReady().then(main).catch((e) => {
 async function main() {
   registerMediaProtocol(protocol);
   let clipUsed = false;
+  let lastTranscribeOpts = null;
   ipcMain.on('clip-used', () => { clipUsed = true; });
+  ipcMain.on('transcribe-opts', (_event, opts) => { lastTranscribeOpts = opts; });
 
   const win = new BrowserWindow({
     show: false,
@@ -62,8 +64,56 @@ async function main() {
   // ファイルを取り込み → 文字起こし実行
   await run(`document.querySelector('#pick-btn').click()`);
   await waitFor(`document.querySelector('.job .start-btn')`, 'ジョブが作られる');
+  await waitFor(`document.querySelector('.job .audio-original').src.startsWith('blob:')`,
+    '元音声プレビューがBlob URLを読み込む');
+  await waitFor(`document.querySelector('.job .audio-original').readyState >= 1`,
+    '元音声プレビューのメタデータが読み込まれる');
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.denoise-seg [data-value="0"]').classList.contains('is-active')
+      && j.querySelector('.preview-btn').disabled;`),
+    'ノイズ除去の初期値は「なし」');
+  await waitFor(`document.querySelector('.job .vad-saved-select option[value="short-replies"]')`,
+    '保存済みVADプリセットが読み込まれる');
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.vad-max').value === '6'
+      && j.querySelector('.vad-sil').value === '0.2'
+      && j.querySelector('.vad-min-speech').value === '0.15'
+      && j.querySelector('.vad-sil').min === '0.05';`),
+    '見直し後の標準値と無音長0.05秒が画面へ反映される');
+  await run(`const j=document.querySelector('.job');
+    j.querySelector('.vad-sil').value='0.05';
+    j.querySelector('.vad-sil').dispatchEvent(new Event('input'));
+    j.querySelector('.vad-preset-name').value='検証用プリセット';
+    j.querySelector('.vad-save').click();`);
+  await waitFor(`document.querySelector('.job .vad-save-status').textContent === '保存しました'`,
+    'カスタムVADプリセットが保存される');
+  check(await run(`const s=document.querySelector('.job .vad-saved-select');
+    return [...s.options].some((o) => o.textContent === '検証用プリセット') && !!s.value;`),
+    '保存したカスタムプリセットを選択状態にできる');
+  await run(`return document.querySelector('.job .audio-original').play()`);
+  await sleep(600);
+  const preview = await run(`const a=document.querySelector('.job .audio-original');
+    return { paused:a.paused, currentTime:a.currentTime, error:a.error && a.error.code, src:a.src };`);
+  check(!preview.paused && preview.currentTime > 0 && !preview.error && preview.src.startsWith('blob:'),
+    `元音声プレビューを再生できる (currentTime=${(preview.currentTime || 0).toFixed(2)}s error=${preview.error || 'なし'})`);
+  await run(`document.querySelector('.job .audio-original').pause()`);
+  check(await run(`const j=document.querySelector('.job');
+    return !j.querySelector('.overlap-aware').checked && j.querySelector('.overlap-speakers').disabled;`),
+    '標準プリセットでは重なり再解析がOFF');
+  await run(`document.querySelector('.job [data-preset="conversation"]').click()`);
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.overlap-aware').checked && !j.querySelector('.overlap-speakers').disabled
+      && j.querySelector('.overlap-speakers').value === '2'
+      && j.querySelector('.vad-max').value === '3'
+      && j.querySelector('.vad-sil').value === '0.1'
+      && j.querySelector('.vad-min-speech').value === '0.2';`),
+    '会話・電話プリセットへ指定値が入り、重なり再解析がON');
   await run(`document.querySelector('.job .start-btn').click()`);
   await waitFor(`document.querySelectorAll('.job .seg-play').length === 3`, '文字起こし結果が描画される');
+  check(lastTranscribeOpts && lastTranscribeOpts.denoiseStrength === 0,
+    '文字起こしへノイズ除去「なし」が渡される');
+  check(lastTranscribeOpts && lastTranscribeOpts.vad.minSpeechDuration === 0.2,
+    '文字起こしへ短い発話の最小長が渡される');
 
   check(await run(`return !document.querySelector('.job .job-result').classList.contains('hidden')`),
     '文字起こし後に結果欄が表示される');

@@ -21,6 +21,8 @@ const DENOISER_URL =
   'https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx';
 const EMB_URL =
   'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx';
+const SEGMENTATION_URL =
+  'https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx';
 
 /** ダウンロードが必要なファイル一覧 [{url, dest}] を返す */
 function plannedDownloads(baseDir) {
@@ -29,6 +31,7 @@ function plannedDownloads(baseDir) {
   items.push({ url: VAD_URL, dest: path.join(baseDir, 'silero_vad.onnx') });
   items.push({ url: DENOISER_URL, dest: path.join(baseDir, 'gtcrn_simple.onnx') });
   items.push({ url: EMB_URL, dest: path.join(baseDir, 'wespeaker_en_voxceleb_resnet34_LM.onnx') });
+  items.push({ url: SEGMENTATION_URL, dest: path.join(baseDir, 'pyannote-segmentation.onnx') });
   return items;
 }
 
@@ -38,13 +41,15 @@ function pathsFor(baseDir) {
     vadPath: path.join(baseDir, 'silero_vad.onnx'),
     denoiserPath: path.join(baseDir, 'gtcrn_simple.onnx'),
     embPath: path.join(baseDir, 'wespeaker_en_voxceleb_resnet34_LM.onnx'),
+    segmentationPath: path.join(baseDir, 'pyannote-segmentation.onnx'),
   };
 }
 
 function isComplete(baseDir) {
-  const { modelDir, vadPath, denoiserPath, embPath } = pathsFor(baseDir);
+  const { modelDir, vadPath, denoiserPath, embPath, segmentationPath } = pathsFor(baseDir);
   return K2_FILES.every((f) => fs.existsSync(path.join(modelDir, f)))
-    && fs.existsSync(vadPath) && fs.existsSync(denoiserPath) && fs.existsSync(embPath);
+    && fs.existsSync(vadPath) && fs.existsSync(denoiserPath) && fs.existsSync(embPath)
+    && fs.existsSync(segmentationPath);
 }
 
 /**

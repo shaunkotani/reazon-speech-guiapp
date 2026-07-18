@@ -47,6 +47,11 @@
     ※ 学習データ (VoxCeleb) に由来する利用条件が課される場合があります。
       商用を含む一般配布の前に配布元・上流の条件を確認してください。
 
+- pyannote segmentation 3.0 (pyannote-segmentation.onnx) （話者交代・重なり検出）
+    ライセンス: MIT
+    https://huggingface.co/pyannote/segmentation-3.0
+    ONNX配布元: https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0
+
 
 ■ ライセンス全文
 ------------------------------------------------

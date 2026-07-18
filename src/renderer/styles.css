@@ -200,6 +200,11 @@ button:disabled { background: #9ca3af; cursor: default; }
 
 /* 発話の区切り方（VAD）。プリセット + 詳細スライダー */
 .vad-note { font-size: 12px; color: var(--muted); flex: 1; min-width: 180px; }
+.vad-saved-select {
+  font-size: 12px; padding: 5px 7px; max-width: 190px;
+  border: 1px solid var(--border); border-radius: 6px; background: #fff;
+}
+.vad-saved-select:disabled { opacity: .55; }
 .vad-details { margin: 2px 0 4px; }
 .vad-details > summary {
   cursor: pointer;
@@ -224,6 +229,20 @@ button:disabled { background: #9ca3af; cursor: default; }
 }
 .vad-body .hint { color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.6; }
 .vad-body .hint strong { color: var(--text); }
+.overlap-ctl {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  border: 1px solid #c7d2fe; background: #eef2ff;
+  border-radius: 7px; padding: 9px 10px; margin-bottom: 14px;
+  font-size: 12px;
+}
+.overlap-ctl .chk { display: flex; align-items: center; gap: 5px; font-weight: 600; cursor: pointer; }
+.overlap-ctl label:not(.chk) { display: flex; align-items: center; gap: 5px; color: var(--muted); }
+.overlap-speakers {
+  font-size: 12px; padding: 3px 6px;
+  border: 1px solid var(--border); border-radius: 5px; background: #fff;
+}
+.overlap-speakers:disabled { opacity: .5; }
+.overlap-ctl .vad-ctl-help { flex-basis: 100%; margin-top: 0; }
 .vad-ctl { display: block; margin-bottom: 14px; }
 .vad-ctl-name { display: block; font-size: 12px; margin-bottom: 4px; }
 .vad-ctl-name b { color: var(--accent); font-size: 13px; }
@@ -236,11 +255,22 @@ button:disabled { background: #9ca3af; cursor: default; }
   margin-top: 3px;
 }
 .vad-ctl-help strong { color: var(--text); }
-.vad-actions { text-align: right; }
+.vad-preset-save {
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  border-top: 1px solid var(--border); padding-top: 10px; margin-top: 2px;
+}
+.vad-preset-name {
+  width: 180px; min-width: 120px; padding: 5px 7px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 5px;
+}
+.vad-save-status { color: var(--muted); font-size: 11px; }
+.vad-actions { text-align: right; margin-top: 8px; }
+.vad-save.ghost, .vad-delete.ghost,
 .vad-reset.ghost {
   background: transparent; color: var(--muted);
   border: 1px solid var(--border); padding: 4px 10px; font-size: 11px;
 }
+.vad-save.ghost:hover, .vad-delete.ghost:hover,
 .vad-reset.ghost:hover { background: #f1f5f9; color: var(--text); }
 
 .diarize-row { display: flex; align-items: center; gap: 12px; padding: 6px 0; flex-wrap: wrap; }
@@ -338,6 +368,12 @@ button:disabled { background: #9ca3af; cursor: default; }
 .seg { display: flex; gap: 10px; padding: 4px 0; font-size: 14px; line-height: 1.5; border-bottom: 1px solid #f0f1f3; }
 .seg .ts { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; white-space: nowrap; padding-top: 2px; }
 .seg .txt { flex: 1; }
+.seg.overlap-recovered { background: #f0fdf4; }
+.overlap-badge {
+  align-self: flex-start; white-space: nowrap;
+  color: #166534; background: #dcfce7; border-radius: 10px;
+  padding: 1px 6px; margin-top: 1px; font-size: 10px;
+}
 
 /* 用語辞書（ホットワード） */
 .hotwords { margin-bottom: 16px; }
