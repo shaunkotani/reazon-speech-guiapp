@@ -40,6 +40,38 @@ function speakerPrefix(s, names) {
   return n ? `${n}: ` : '';
 }
 
+/** まとめる区間のテキスト連結。前が「。」で終わっていなければ「。」を補う。 */
+function joinText(prevText, nextText) {
+  if (!prevText) return nextText;
+  if (!nextText) return prevText;
+  return prevText.endsWith('。') ? `${prevText}${nextText}` : `${prevText}。${nextText}`;
+}
+
+/**
+ * 連続する同一話者の区間を1つにまとめる。
+ * 未割当（null/undefined）と話者不明（-1）はまとめない。前者は話者識別前に全体が
+ * 1区間になってしまうため、後者は別人の可能性があるため。
+ * まとめた区間は start=先頭, end=末尾, text=連結。
+ */
+function mergeSameSpeaker(segments) {
+  const out = [];
+  for (const s of segments) {
+    const prev = out[out.length - 1];
+    if (prev && s.speaker != null && s.speaker >= 0 && prev.speaker === s.speaker) {
+      prev.end = s.end;
+      prev.text = joinText(prev.text, s.text);
+    } else {
+      out.push({ ...s });
+    }
+  }
+  return out;
+}
+
+/** エクスポート対象の区間列（result.mergeSpeakers が真ならまとめる）。 */
+function segmentsOf(result) {
+  return result.mergeSpeakers ? mergeSameSpeaker(result.segments) : result.segments;
+}
+
 function toPlainText(segments, names) {
   return segments.map((s) => timePrefix(s) + speakerPrefix(s, names) + s.text).join('\n');
 }
@@ -62,10 +94,13 @@ function toJSON(result) {
 }
 
 const EXPORTERS = {
-  txt: { ext: 'txt', mime: 'text/plain', build: (r) => toPlainText(r.segments, r.speakerNames) },
-  srt: { ext: 'srt', mime: 'application/x-subrip', build: (r) => toSRT(r.segments, r.speakerNames) },
-  vtt: { ext: 'vtt', mime: 'text/vtt', build: (r) => toVTT(r.segments, r.speakerNames) },
-  json: { ext: 'json', mime: 'application/json', build: (r) => toJSON(r) },
+  txt: { ext: 'txt', mime: 'text/plain', build: (r) => toPlainText(segmentsOf(r), r.speakerNames) },
+  srt: { ext: 'srt', mime: 'application/x-subrip', build: (r) => toSRT(segmentsOf(r), r.speakerNames) },
+  vtt: { ext: 'vtt', mime: 'text/vtt', build: (r) => toVTT(segmentsOf(r), r.speakerNames) },
+  json: { ext: 'json', mime: 'application/json', build: (r) => toJSON({ ...r, segments: segmentsOf(r) }) },
 };
 
-module.exports = { formatTime, formatClock, timePrefix, toPlainText, toSRT, toVTT, toJSON, EXPORTERS };
+module.exports = {
+  formatTime, formatClock, timePrefix, mergeSameSpeaker, segmentsOf,
+  toPlainText, toSRT, toVTT, toJSON, EXPORTERS,
+};
