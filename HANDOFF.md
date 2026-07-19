@@ -110,7 +110,19 @@ docs/         Microsoft Store計画、旧Azure署名手順
 - ファイルごとに独立したジョブカードを作成する。
 - 元音声の先頭10秒プレビュー。
 - ノイズ除去は「なし」が既定。弱 0.5 / 中 0.8 / 強 1.0 を選べ、除去後の先頭10秒も試聴可能。
-- 並列認識、進捗、推定残り時間、中止。
+- 並列認識、工程別進捗、推定残り時間、中止。
+- ファイル文字起こしは `transcribe:status` で preparing / decoding / overlap / denoising /
+  vad / recognizing / finalizing を通知する。増分を取得できない前処理は不定進捗表示、認識中は
+  完了区間の音声秒数を作業量としてETAを平滑化する。長時間更新がない場合は警告へ切り替える。
+- 複数ファイルは `SerialJobQueue` でファイル単位に直列実行する。1ファイル内では最大4ワーカーを
+  従来どおり並列利用する。待機ジョブへ queued と全体内の位置を通知し、待機中の中止は実行中
+  ワーカーを終了させない。
+- `processBatch` の区間完了イベントは idx / text / workSec を含む。画面には通常（base）区間だけを
+  暫定表示し、重なり補正候補は完了時の合意処理まで表示しない。
+- ファイル処理中は `BrowserWindow.setProgressBar()` でタスクバーへ進捗を反映し、ウィンドウが
+  非アクティブの時に完了するとOS通知を出す。通知クリックでウィンドウを復元・フォーカスする。
+- 失敗時はコード・発生工程・利用者向け説明・技術情報を分離し、再試行可能な場合は同じ設定で
+  やり直せる。中止はエラー表示にしない。
 - 中止は実行中のネイティブ呼び出しを細粒度で止める方式ではなく、ワーカープールを終了して確実に止める。
 
 ### 4.2 認識設定
@@ -293,6 +305,8 @@ npm start
 
 # モデル不要の回帰
 npm run test:overlap
+npm run test:progress
+npm run test:queue
 npm run test:renderer
 
 # ./models と samples が必要
@@ -311,7 +325,9 @@ npm run dist:mac
 検証の意味:
 
 - `test:overlap`: 厳密分割、重なり検出、補正候補、合意選択の純JS回帰。
-- `test:renderer`: 元音声 Blob 再生、標準値、カスタムプリセット保存、会話プリセット、文字起こしオプション、全体・区間再生、やり直しをスタブ付きで実駆動する。
+- `test:progress`: 工程構成、音声秒数ベースETA、遅延閾値、エラー分類の純JS回帰。
+- `test:queue`: ファイル単位の直列実行、待機位置更新、待機ジョブ中止の純JS回帰。
+- `test:renderer`: 元音声 Blob 再生、標準値、カスタムプリセット保存、会話プリセット、待機順・暫定結果・進捗・遅延・失敗表示、文字起こしオプション、全体・区間再生、やり直しをスタブ付きで実駆動する。
 - `test:realtime`: 本番 asrWorker を advanced serialization で fork し、100ms チャンク投入 → 確定区間イベント → 録音 WAV 生成までのリアルタイム経路を回帰する。
 - `scripts/test-realtime.js`: core 直接の擬似ストリームで遅延（VAD確定+認識）を実測する調査用。
 - `test:cli` / pool / enroll / hotwords: native addon とローカルモデルを使うため、環境依存で時間がかかる。

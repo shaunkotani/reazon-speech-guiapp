@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld('api', {
   transcribe: (filePath, jobId, opts) =>
     ipcRenderer.invoke('transcribe:file', filePath, jobId, opts),
   cancelTranscribe: (jobId) => ipcRenderer.invoke('transcribe:cancel', jobId),
+  onTranscribeStatus: (cb) => ipcRenderer.on('transcribe:status', (_e, p) => cb(p)),
   onTranscribeProgress: (cb) => ipcRenderer.on('transcribe:progress', (_e, p) => cb(p)),
   // 話者タグ付け用に全区間の声紋を遅延計算 -> { ok, count }
   computeEmbeddings: (jobId, filePath, denoiseStrength, segments) =>

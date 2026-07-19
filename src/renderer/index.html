@@ -223,9 +223,44 @@
       </div>
 
       <div class="progress-wrap hidden">
-        <div class="progress"><div class="bar"></div></div>
-        <span class="eta"></span>
-        <button class="cancel-btn">中止</button>
+        <div class="progress-top">
+          <span class="progress-health">
+            <span class="health-dot"></span>
+            <span class="health-text">正常に処理中</span>
+          </span>
+          <span class="progress-count"></span>
+        </div>
+        <div class="progress-stage" role="status" aria-live="polite" aria-atomic="true">認識エンジンを準備中…</div>
+        <div class="progress" role="progressbar" aria-label="文字起こし進捗" aria-valuemin="0" aria-valuemax="100"><div class="bar is-indeterminate"></div></div>
+        <div class="progress-footer">
+          <span class="eta">残り時間を計算中</span>
+          <span class="elapsed">経過 00:00</span>
+          <span class="progress-spacer"></span>
+          <button class="cancel-btn">中止</button>
+        </div>
+        <p class="progress-warning hidden"></p>
+        <div class="partial-transcript hidden">
+          <div class="partial-head">
+            <strong>認識できた内容</strong>
+            <span>暫定表示・完了時に順番を整理します</span>
+          </div>
+          <div class="partial-segments"></div>
+        </div>
+        <details class="progress-details">
+          <summary>処理の詳細</summary>
+          <ol class="progress-steps"></ol>
+        </details>
+      </div>
+      <div class="job-error hidden" role="alert">
+        <strong class="job-error-title"></strong>
+        <p class="job-error-message"></p>
+        <div class="job-error-actions">
+          <button class="retry-btn">もう一度試す</button>
+        </div>
+        <details class="job-error-details">
+          <summary>技術情報</summary>
+          <pre class="job-error-technical"></pre>
+        </details>
       </div>
       <div class="job-result hidden">
         <div class="result-audio-row">
@@ -314,6 +349,7 @@
     </div>
   </div>
 
+  <script src="../shared/transcriptionProgress.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

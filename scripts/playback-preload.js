@@ -13,6 +13,9 @@ function mediaUrl(absPath) {
 }
 
 const noop = () => {};
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let transcribeStatusListener = noop;
+let transcribeCalls = 0;
 let savedVadPresets = [{
   id: 'short-replies', name: '短い相槌',
   maxSpeechDuration: 3, minSilenceDuration: 0.05, minSpeechDuration: 0.05, threshold: 0.65,
@@ -52,11 +55,48 @@ contextBridge.exposeInMainWorld('api', {
   openFiles: async () => [TARGET],
   pathForFile: (f) => f.path || TARGET,
   mediaUrl,
-  transcribe: async (_filePath, _jobId, opts) => {
+  transcribe: async (_filePath, jobId, opts) => {
+    transcribeCalls++;
     ipcRenderer.send('transcribe-opts', opts);
+    transcribeStatusListener({
+      jobId, state: 'queued', phase: 'queued', queuePosition: 1, queueTotal: 1,
+    });
+    await pause(100);
+    transcribeStatusListener({ jobId, state: 'running', phase: 'preparing' });
+    await pause(20);
+    transcribeStatusListener({ jobId, state: 'running', phase: 'decoding' });
+    await pause(20);
+    if (transcribeCalls === 3) {
+      const error = {
+        code: 'NO_DISK_SPACE', retryable: true,
+        title: '作業用の空き容量が不足しています',
+        message: 'ディスクの空き容量を増やしてから、もう一度お試しください。',
+        technical: 'ENOSPC: test',
+      };
+      transcribeStatusListener({ jobId, state: 'error', phase: 'decoding', error });
+      throw new Error(error.technical);
+    }
+    transcribeStatusListener({ jobId, state: 'running', phase: 'overlap', totalAudioSec: RESULT.duration });
+    await pause(20);
+    transcribeStatusListener({ jobId, state: 'running', phase: 'vad', totalAudioSec: RESULT.duration });
+    await pause(20);
+    transcribeStatusListener({
+      jobId, state: 'running', phase: 'recognizing', completed: 0, total: 3,
+      completedWorkSec: 0, totalWorkSec: 14.27, totalAudioSec: RESULT.duration, ratio: 0,
+    });
+    await pause(220);
+    transcribeStatusListener({
+      jobId, state: 'running', phase: 'recognizing', completed: 2, total: 3,
+      completedWorkSec: 7.82, totalWorkSec: 14.27, totalAudioSec: RESULT.duration, ratio: 0.548,
+      partial: { index: 0, start: 0.65, end: 1.99, text: 'はいもしもし' },
+    });
+    await pause(220);
+    transcribeStatusListener({ jobId, state: 'running', phase: 'finalizing', completed: 3, total: 3 });
+    await pause(20);
     return RESULT;
   },
   cancelTranscribe: async () => true,
+  onTranscribeStatus: (cb) => { transcribeStatusListener = cb; },
   onTranscribeProgress: noop,
   computeEmbeddings: async () => ({ ok: true, count: RESULT.segments.length }),
   onEmbedProgress: noop,

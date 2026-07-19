@@ -9,6 +9,7 @@ const dropzone = $('#dropzone');
 const pickBtn = $('#pick-btn');
 const jobsEl = $('#jobs');
 const jobTpl = $('#job-template');
+const transcriptionProgress = window.TranscriptionProgress;
 
 let modelReady = false;
 let jobSeq = 0;
@@ -464,10 +465,20 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
   // ---- 結果側の操作は「ジョブ生成時に1回だけ」束ねる ----
   // やり直しで onJobDone が複数回走るため、ここ以外で addEventListener すると
   // ハンドラが二重登録され、書き出しが2回走るなどの不具合になる。
-  el.querySelector('.cancel-btn').addEventListener('click', () => {
-    window.api.cancelTranscribe(jobId);
+  el.querySelector('.cancel-btn').addEventListener('click', async () => {
+    const cancelBtn = el.querySelector('.cancel-btn');
+    cancelBtn.disabled = true;
+    applyTranscribeStatus(jobId, { state: 'cancelling' });
     el.querySelector('.job-status').textContent = '中止中…';
+    try {
+      await window.api.cancelTranscribe(jobId);
+    } catch (e) {
+      cancelBtn.disabled = false;
+      job.slowWarning = `中止の要求を送れませんでした: ${e.message || e}`;
+      renderProgressHealth(job);
+    }
   });
+  el.querySelector('.retry-btn').addEventListener('click', () => el.querySelector('.start-btn').click());
   el.querySelector('.redo-btn').addEventListener('click', () => reopenSetup(jobId));
   el.querySelector('.back-btn').addEventListener('click', () => closeSetup(jobId));
   el.querySelector('.tag-btn').addEventListener('click', () => {
@@ -518,7 +529,7 @@ function reopenSetup(jobId) {
   el.querySelector('.back-btn').classList.toggle('hidden', !job.result);
   const status = el.querySelector('.job-status');
   status.textContent = '設定を変更中';
-  status.classList.remove('done', 'error');
+  status.classList.remove('done', 'error', 'warning');
 }
 
 // やり直しをやめて、保持しておいた前回の結果表示に戻る
@@ -530,23 +541,23 @@ function closeSetup(jobId) {
   el.querySelector('.job-result').classList.remove('hidden');
   const status = el.querySelector('.job-status');
   status.textContent = '完了';
+  status.classList.remove('error', 'warning');
   status.classList.add('done');
 }
 
 function startTranscribe(jobId, filePath, opts) {
   const job = jobs.get(jobId);
   job.denoiseStrength = opts.denoiseStrength || 0; // 後付け声紋計算で同条件にする
+  job.lastTranscribeOpts = opts;
   const el = job.el;
   resetResultUi(job);
   el.querySelector('.back-btn').classList.add('hidden');
   el.querySelector('.job-setup').classList.add('hidden');
-  el.querySelector('.progress-wrap').classList.remove('hidden');
-  el.querySelector('.progress-wrap .bar').style.width = '0%';
   const status = el.querySelector('.job-status');
-  status.textContent = opts.denoiseStrength > 0 ? '処理中…（ノイズ除去）' : '処理中…';
-  status.classList.remove('done', 'error');
+  status.textContent = '処理中';
+  status.classList.remove('done', 'error', 'warning');
+  initializeTranscribeProgress(jobId, job, opts);
   job.startTime = Date.now();               // 残り時間推定の基点
-  el.querySelector('.eta').textContent = '';
 
   window.api.transcribe(filePath, jobId, opts)
     .then((result) => onJobDone(jobId, result))
@@ -571,6 +582,7 @@ function resetResultUi(job) {
   if (job._audioObjectUrl) { URL.revokeObjectURL(job._audioObjectUrl); job._audioObjectUrl = null; }
 
   el.querySelector('.job-result').classList.add('hidden');
+  el.querySelector('.job-error').classList.add('hidden');
   el.querySelector('.result-audio-row').classList.remove('hidden');
   el.querySelector('.segments').innerHTML = '';
   el.querySelector('.embed-progress').classList.add('hidden');
@@ -596,12 +608,213 @@ function speakerLabel(job, spk) {
   return job.names[spk] || `話者${spk + 1}`;
 }
 
-window.api.onTranscribeProgress(({ jobId, ratio }) => {
+function renderPartialTranscript(job, partial) {
+  if (partial && String(partial.text || '').trim()) {
+    job.partialSegments.set(partial.index, { ...partial, receivedAt: Date.now() });
+  }
+  const box = job.el.querySelector('.partial-transcript');
+  const list = box.querySelector('.partial-segments');
+  const recent = [...job.partialSegments.values()]
+    .sort((a, b) => b.receivedAt - a.receivedAt)
+    .slice(0, 8)
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  box.classList.toggle('hidden', recent.length === 0);
+  list.replaceChildren(...recent.map((segment) => {
+    const row = document.createElement('div');
+    const time = document.createElement('span');
+    const text = document.createElement('span');
+    row.className = 'partial-seg';
+    time.className = 'partial-seg-time';
+    text.className = 'partial-seg-text';
+    time.textContent = fmtTime(segment.start);
+    text.textContent = segment.text;
+    row.append(time, text);
+    return row;
+  }));
+}
+
+function renderProgressSteps(job) {
+  const list = job.el.querySelector('.progress-steps');
+  const phases = job.progressPhases || [];
+  const current = job.currentProgress ? job.currentProgress.phase : 'preparing';
+  const currentIndex = Math.max(0, phases.indexOf(current));
+  list.replaceChildren(...phases.map((phase, index) => {
+    const li = document.createElement('li');
+    const icon = document.createElement('span');
+    const label = document.createElement('span');
+    icon.className = 'progress-step-icon';
+    if (index < currentIndex) {
+      li.className = 'is-complete';
+      icon.textContent = '✓';
+    } else if (index === currentIndex) {
+      li.className = 'is-current';
+      icon.textContent = '→';
+    } else {
+      icon.textContent = '○';
+    }
+    label.textContent = transcriptionProgress.phaseMeta(phase).label;
+    li.append(icon, label);
+    return li;
+  }));
+}
+
+function renderProgressHealth(job) {
+  const wrap = job.el.querySelector('.progress-wrap');
+  const health = wrap.querySelector('.health-text');
+  const warning = wrap.querySelector('.progress-warning');
+  const jobStatus = job.el.querySelector('.job-status');
+  const cancelling = job.currentProgress && job.currentProgress.state === 'cancelling';
+  const queued = job.currentProgress && job.currentProgress.state === 'queued';
+  const delayed = !!job.slowWarning;
+  const degraded = !!job.pipelineWarning;
+  wrap.classList.toggle('is-cancelling', cancelling);
+  wrap.classList.toggle('is-queued', queued);
+  wrap.classList.toggle('is-warning', !cancelling && (delayed || degraded));
+  jobStatus.classList.toggle('warning', !cancelling && !queued && (delayed || degraded));
+
+  if (cancelling) health.textContent = '中止しています';
+  else if (queued) health.textContent = '待機中';
+  else if (delayed) health.textContent = '通常より時間がかかっています';
+  else if (degraded) health.textContent = '一部機能を省略して処理中';
+  else health.textContent = '正常に処理中';
+  if (queued) jobStatus.textContent = '待機中';
+  else if (!cancelling) jobStatus.textContent = '処理中';
+
+  const messages = [];
+  if (job.pipelineWarning) messages.push(job.pipelineWarning);
+  if (job.slowWarning) messages.push(job.slowWarning);
+  warning.textContent = messages.join(' ');
+  warning.classList.toggle('hidden', messages.length === 0);
+}
+
+function stopProgressTimer(job) {
+  if (job.progressTimer) clearInterval(job.progressTimer);
+  job.progressTimer = null;
+}
+
+function updateProgressClock(job) {
+  if (!job.progressStartedAt) return;
+  const now = Date.now();
+  const current = job.currentProgress;
+  job.el.querySelector('.elapsed').textContent =
+    `${current && current.state === 'queued' ? '待機' : '経過'} ${transcriptionProgress.formatElapsed((now - job.progressStartedAt) / 1000)}`;
+
+  if (!current || current.state === 'cancelling') return;
+  if (current.phase === 'recognizing' || current.phase === 'finalizing') {
+    job.el.querySelector('.eta').textContent = transcriptionProgress.updateEta(job.etaState, current, now);
+  }
+  const threshold = transcriptionProgress.slowThresholdMs(current.phase, current.totalAudioSec);
+  if (now - job.lastProgressAt > threshold && !job.slowWarning) {
+    job.slowWarning = 'この工程の終了はまだ確認できていません。このまま待つか、中止できます。';
+    renderProgressHealth(job);
+  }
+}
+
+function initializeTranscribeProgress(jobId, job, opts) {
+  stopProgressTimer(job);
+  const wrap = job.el.querySelector('.progress-wrap');
+  wrap.classList.remove('hidden', 'is-warning', 'is-cancelling', 'is-queued');
+  wrap.querySelector('.cancel-btn').disabled = false;
+  wrap.querySelector('.progress-details').open = false;
+  job.progressPhases = transcriptionProgress.configuredPhases(opts);
+  job.progressStartedAt = Date.now();
+  job.lastProgressAt = job.progressStartedAt;
+  job.etaState = transcriptionProgress.createEtaState();
+  job.pipelineWarning = '';
+  job.pipelineWarningDetail = '';
+  job.slowWarning = '';
+  job.errorInfo = null;
+  job.currentProgress = null;
+  job.partialSegments = new Map();
+  wrap.querySelector('.partial-transcript').classList.add('hidden');
+  wrap.querySelector('.partial-segments').replaceChildren();
+  wrap.querySelector('.elapsed').textContent = '経過 00:00';
+  applyTranscribeStatus(jobId, { state: 'queued', phase: 'queued', queuePosition: 1, queueTotal: 1, ratio: null });
+  job.progressTimer = setInterval(() => updateProgressClock(job), 1000);
+}
+
+function applyTranscribeStatus(jobId, incoming) {
   const job = jobs.get(jobId);
   if (!job) return;
-  job.el.querySelector('.progress-wrap .bar').style.width = `${Math.round(ratio * 100)}%`;
-  if (job.startTime) job.el.querySelector('.eta').textContent = etaText(job.startTime, ratio);
-});
+  const wrap = job.el.querySelector('.progress-wrap');
+  const now = Date.now();
+
+  if (incoming.error) job.errorInfo = incoming.error;
+  if (incoming.partial) renderPartialTranscript(job, incoming.partial);
+  if (incoming.warning) {
+    job.pipelineWarning = incoming.warning;
+    job.pipelineWarningDetail = incoming.warningDetail || '';
+    renderProgressHealth(job);
+    return;
+  }
+  if (incoming.state === 'error' || incoming.state === 'cancelled' || incoming.state === 'completed') return;
+  if (incoming.state === 'cancelling') {
+    job.currentProgress = { ...(job.currentProgress || {}), state: 'cancelling' };
+    wrap.querySelector('.progress-stage').textContent = '処理を中止しています…';
+    wrap.querySelector('.cancel-btn').disabled = true;
+    renderProgressHealth(job);
+    return;
+  }
+
+  const previous = job.currentProgress || {};
+  const progress = {
+    ...previous,
+    ...incoming,
+    state: incoming.state || 'running',
+    phase: incoming.phase || previous.phase || 'preparing',
+    totalAudioSec: incoming.totalAudioSec || previous.totalAudioSec || 0,
+  };
+  job.currentProgress = progress;
+  job.lastProgressAt = now;
+  job.slowWarning = '';
+
+  const meta = transcriptionProgress.phaseMeta(progress.phase);
+  wrap.querySelector('.progress-stage').textContent = progress.state === 'queued'
+    ? `開始待ち（${progress.queuePosition || 1}番目 / 全${progress.queueTotal || 1}件）`
+    : meta.active;
+  const count = wrap.querySelector('.progress-count');
+  if (progress.state === 'queued') {
+    count.textContent = `${progress.queuePosition || 1} / ${progress.queueTotal || 1}件`;
+  } else if (progress.phase === 'recognizing' && Number(progress.total) > 0) {
+    const done = Math.min(Number(progress.total), Math.max(0, Number(progress.completed) || 0));
+    const ratio = isFinite(Number(progress.ratio)) ? Math.max(0, Math.min(1, Number(progress.ratio))) : done / progress.total;
+    count.textContent = `${done} / ${progress.total}区間（${Math.round(ratio * 100)}%）`;
+  } else {
+    count.textContent = '';
+  }
+
+  const bar = wrap.querySelector('.bar');
+  const progressBar = bar.parentElement;
+  const ratio = Number(progress.ratio);
+  if (progress.phase === 'recognizing' && isFinite(ratio)) {
+    const percent = Math.round(Math.max(0, Math.min(1, ratio)) * 100);
+    bar.classList.remove('is-indeterminate');
+    bar.style.width = `${percent}%`;
+    progressBar.setAttribute('aria-valuenow', String(percent));
+  } else {
+    bar.style.width = '';
+    bar.classList.add('is-indeterminate');
+    progressBar.removeAttribute('aria-valuenow');
+  }
+  wrap.querySelector('.eta').textContent = transcriptionProgress.updateEta(job.etaState, progress, now);
+  renderProgressSteps(job);
+  renderProgressHealth(job);
+}
+
+if (typeof window.api.onTranscribeStatus === 'function') {
+  window.api.onTranscribeStatus((status) => applyTranscribeStatus(status.jobId, status));
+} else {
+  // 古い preload と組み合わせた場合の互換表示。
+  window.api.onTranscribeProgress(({ jobId, ratio }) => {
+    const job = jobs.get(jobId);
+    if (!job) return;
+    applyTranscribeStatus(jobId, {
+      state: 'running', phase: 'recognizing', ratio,
+      completedWorkSec: ratio, totalWorkSec: 1,
+      completed: Math.round(ratio * 100), total: 100,
+    });
+  });
+}
 
 // 声紋計算の進捗
 window.api.onEmbedProgress(({ jobId, ratio }) => {
@@ -615,6 +828,7 @@ window.api.onEmbedProgress(({ jobId, ratio }) => {
 function onJobDone(jobId, result) {
   const job = jobs.get(jobId);
   if (!job) return;
+  stopProgressTimer(job);
   job.result = result;
   job.names = {};            // 話者ID -> 名前
   job.anchors = new Map();   // 区間index -> 手本として割り当てた話者ID
@@ -625,6 +839,7 @@ function onJobDone(jobId, result) {
   el.querySelector('.progress-wrap').classList.add('hidden');
   const status = el.querySelector('.job-status');
   status.textContent = '完了';
+  status.classList.remove('error', 'warning');
   status.classList.add('done');
   el.querySelector('.job-result').classList.remove('hidden');
 
@@ -962,11 +1177,32 @@ function plainTextWithSpeakers(job) {
 function onJobError(jobId, err) {
   const job = jobs.get(jobId);
   if (!job) return;
+  stopProgressTimer(job);
   job.el.querySelector('.progress-wrap').classList.add('hidden');
   const status = job.el.querySelector('.job-status');
   const msg = String(err.message || err);
-  status.textContent = msg.includes('中止') ? '中止しました' : `エラー: ${msg}`;
-  status.classList.add('error');
+  const info = job.errorInfo || transcriptionProgress.describeError(
+    err,
+    job.currentProgress && job.currentProgress.phase,
+    msg.includes('中止'),
+  );
+  const cancelled = info.cancelled || info.code === 'CANCELLED';
+  status.classList.remove('done', 'warning', 'error');
+  status.textContent = cancelled ? '中止しました' : '失敗';
+  if (!cancelled) status.classList.add('error');
+
+  const errorBox = job.el.querySelector('.job-error');
+  errorBox.classList.toggle('hidden', cancelled);
+  if (!cancelled) {
+    errorBox.querySelector('.job-error-title').textContent = info.title;
+    errorBox.querySelector('.job-error-message').textContent = info.message;
+    const phase = job.currentProgress && job.currentProgress.phase;
+    const phaseText = phase ? `発生工程: ${transcriptionProgress.phaseMeta(phase).label}\n` : '';
+    errorBox.querySelector('.job-error-technical').textContent =
+      `コード: ${info.code || 'TRANSCRIBE_FAILED'}\n${phaseText}${info.technical || msg}`;
+    errorBox.querySelector('.job-error-details').open = false;
+    errorBox.querySelector('.retry-btn').classList.toggle('hidden', info.retryable === false);
+  }
   // 失敗・中止したら設定画面に戻し、条件を変えて再実行できるようにする
   job.el.querySelector('.job-setup').classList.remove('hidden');
   job.el.querySelector('.back-btn').classList.toggle('hidden', !job.result);

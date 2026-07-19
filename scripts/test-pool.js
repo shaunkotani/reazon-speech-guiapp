@@ -41,15 +41,27 @@ function rpc(w, op, args, onEvent) {
 
   const pcmPath = path.join(os.tmpdir(), `pooltest-${Date.now()}.pcm`);
   const t0 = Date.now();
-  const prep = await rpc(pool[0], 'prepare', { filePath: file, denoiseStrength: 0, outPath: pcmPath });
+  const prepPhases = [];
+  const prep = await rpc(pool[0], 'prepare', { filePath: file, denoiseStrength: 0, outPath: pcmPath }, (ev) => {
+    if (ev.kind === 'phase') prepPhases.push(ev.phase);
+  });
+  if (prepPhases.join(',') !== 'decoding,vad') throw new Error(`unexpected prepare phases: ${prepPhases.join(',')}`);
   console.log(`prepare: ${prep.segments.length} segments, ${prep.duration.toFixed(1)}s (${Date.now() - t0}ms)`);
 
   const batches = Array.from({ length: pool.length }, () => []);
   prep.segments.forEach((s, idx) => batches[idx % pool.length].push({ idx, start: s.start, end: s.end }));
   let done = 0;
+  const segmentEvents = [];
   const partial = new Array(prep.segments.length);
   const t1 = Date.now();
-  await Promise.all(batches.map((items, w) => items.length ? rpc(pool[w], 'processBatch', { pcmPath, items, wantEmbedding: true }, (ev) => { done += ev.n; process.stdout.write(`\r  ${done}/${prep.segments.length}   `); }).then((res) => { for (const r of res) partial[r.idx] = { ...prep.segments[r.idx], text: r.text, embedding: r.embedding }; }) : null));
+  await Promise.all(batches.map((items, w) => items.length ? rpc(pool[w], 'processBatch', { pcmPath, items, wantEmbedding: true }, (ev) => {
+    done += ev.n;
+    segmentEvents.push(ev);
+    process.stdout.write(`\r  ${done}/${prep.segments.length}   `);
+  }).then((res) => { for (const r of res) partial[r.idx] = { ...prep.segments[r.idx], text: r.text, embedding: r.embedding }; }) : null));
+  if (segmentEvents.some((ev) => !Number.isInteger(ev.idx) || typeof ev.text !== 'string' || !(ev.workSec >= 0))) {
+    throw new Error('segment progress event is missing partial-result fields');
+  }
   process.stdout.write('\n');
   console.log(`parallel ASR+embedding done in ${Date.now() - t1}ms`);
 

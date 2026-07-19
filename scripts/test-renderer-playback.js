@@ -138,6 +138,35 @@ async function main() {
       && j.querySelector('.vad-th').value === '0.2';`),
     'インタビュープリセットへ指定値が入り、重なり再解析がON');
   await run(`document.querySelector('.job .start-btn').click()`);
+  await waitFor(`document.querySelector('.job .progress-stage').textContent.includes('開始待ち')`,
+    'キューの待機順が表示される');
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.health-text').textContent === '待機中'
+      && j.querySelector('.progress-count').textContent === '1 / 1件';`),
+    '待機状態とキュー内の位置が表示される');
+  check(await run(`applyTranscribeStatus(1, {
+      state:'queued', phase:'queued', queuePosition:2, queueTotal:3
+    }); const j=document.querySelector('.job');
+    return j.querySelector('.progress-stage').textContent.includes('2番目 / 全3件')
+      && j.querySelector('.progress-count').textContent === '2 / 3件';`),
+    '待機ジョブの順番変更が画面へ反映される');
+  await waitFor(`!document.querySelector('.job .progress-wrap').classList.contains('hidden')
+    && document.querySelector('.job .progress-stage').textContent.includes('文字に変換')`,
+    '文字起こし工程と進捗パネルが表示される');
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.health-text').textContent === '正常に処理中'
+      && j.querySelector('.progress-count').textContent.includes('/ 3区間')
+      && j.querySelectorAll('.progress-steps li').length === 7;`),
+    '正常性・処理区間数・工程一覧が表示される');
+  await waitFor(`document.querySelector('.job .partial-seg-text')`, '認識済み文章が暫定表示される');
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.partial-seg-text').textContent === 'はいもしもし'
+      && j.querySelector('.partial-head').textContent.includes('暫定表示');`),
+    '処理中の文字起こしを暫定結果と明記して表示する');
+  check(await run(`const job=jobs.get(1); job.lastProgressAt=Date.now()-60000; updateProgressClock(job);
+    return job.el.querySelector('.health-text').textContent === '通常より時間がかかっています'
+      && !job.el.querySelector('.progress-warning').classList.contains('hidden');`),
+    '更新が長く止まった工程はエラーと断定せず遅延警告を表示する');
   await waitFor(`document.querySelectorAll('.job .seg-play').length === 3`, '文字起こし結果が描画される');
   check(lastTranscribeOpts && lastTranscribeOpts.denoiseStrength === 0,
     '文字起こしへノイズ除去「なし」が渡される');
@@ -196,6 +225,20 @@ async function main() {
       rowHidden: document.querySelector('.job .result-audio-row').classList.contains('hidden') };`);
   check(!redo.rowHidden && !redo.err && !redo.paused && redo.ct >= 0.6,
     `やり直し後も区間再生が動く (currentTime=${(redo.ct || 0).toFixed(2)}s error=${redo.err || 'なし'})`);
+
+  // 構造化エラーが利用者向け説明と再試行導線へ変換されるか
+  await run(`document.querySelector('#pick-btn').click()`);
+  await waitFor(`document.querySelectorAll('.job').length === 2`, 'エラー表示検証用のジョブが作られる');
+  await run(`document.querySelector('.job .start-btn').click()`);
+  await waitFor(`!document.querySelector('.job .job-error').classList.contains('hidden')`,
+    '文字起こし失敗の説明が表示される');
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.job-status').textContent === '失敗'
+      && j.querySelector('.job-error-title').textContent.includes('空き容量')
+      && j.querySelector('.job-error-technical').textContent.includes('NO_DISK_SPACE')
+      && !j.querySelector('.retry-btn').classList.contains('hidden')
+      && !j.querySelector('.job-setup').classList.contains('hidden');`),
+    '失敗工程・技術情報・再試行ボタンを示し、設定画面へ戻る');
 
   const errLogs = logs.filter((l) => /error|失敗|unavailable|interrupted/i.test(l));
   if (errLogs.length) { console.log('\n-- renderer console --'); errLogs.forEach((l) => console.log('  ' + l)); }

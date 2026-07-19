@@ -89,11 +89,14 @@ function rtEnqueue(seg) {
 // ---- 各オペレーション ----
 const OPS = {
   // 原音で重なり検出 → ノイズ除去 → 共有 PCM 保存 → VAD/話者区間境界を返す
-  async prepare({ filePath, denoiseStrength, outPath, vad, overlap }) {
+  async prepare({ filePath, denoiseStrength, outPath, vad, overlap }, emit) {
+    emit({ kind: 'phase', phase: 'decoding' });
     const rawSamples = await core.decodeToPcm(filePath);
+    const totalAudioSec = rawSamples.length / core.SAMPLE_RATE;
     let speakerSegments = [];
     let overlapError = '';
     if (overlap && overlap.enabled) {
+      emit({ kind: 'phase', phase: 'overlap', totalAudioSec });
       try {
         const diarizer = diarizerFor(overlap.numSpeakers);
         if (diarizer) {
@@ -109,10 +112,12 @@ const OPS = {
 
     let samples = rawSamples;
     if (ctx.denoiser && denoiseStrength > 0) {
+      emit({ kind: 'phase', phase: 'denoising', totalAudioSec });
       samples = core.denoisePcm(ctx.denoiser, samples, denoiseStrength);
     }
     const duration = samples.length / core.SAMPLE_RATE;
     core.writePcmRaw(samples, outPath); // 共有用 raw float32
+    emit({ kind: 'phase', phase: 'vad', totalAudioSec: duration });
     const segs = core.collectVadSegments(samples, vadFor(vad));
     return {
       pcmPath: outPath,
@@ -140,7 +145,10 @@ const OPS = {
         entry.embedding = Array.from(core.extractEmbedding(ctx.embedder, slice));
       }
       out.push(entry);
-      emit({ kind: 'seg', n: 1 });
+      emit({
+        kind: 'seg', n: 1, idx: it.idx, text,
+        workSec: Math.max(0, it.end - it.start),
+      });
     }
     return out;
   },
