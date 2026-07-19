@@ -5,10 +5,13 @@
 //
 // 汎用 RPC: メインから {type:'request', rid, op, args} を受け、処理中は
 // {type:'event', rid, ...} を送り、完了で {type:'response', rid, result} を返す。
+const fs = require('fs');
 const core = require('../core/asr');
+const overlapTools = require('../shared/overlap');
 
 let ctx = null;          // recognizer / VAD / denoiser / embedding / lazy diarizer
 let pcmCache = null;     // { path, samples } 直近に読んだ PCM をキャッシュ
+let rt = null;           // リアルタイムセッション（専用ワーカーで1つだけ）
 
 function init({ modelDir, vadPath, denoiserPath, embPath, segmentationPath, hotwordsFile, hotwordsScore, beamSearch }) {
   ctx = {
@@ -56,6 +59,31 @@ function diarizerFor(numSpeakers) {
     ctx.diarizerKey = key;
   }
   return ctx.diarizer;
+}
+
+// リアルタイム: VAD が確定した発話区間をバッチと同じ規則で上限内に分割し、
+// 認識キュー（Promise チェーン）へ積む。認識は feed と並行して直列に進み、
+// 1 区間確定するごとに event で main へ送る。
+function rtEnqueue(seg) {
+  const session = rt;
+  const parts = overlapTools.splitStrictSegments([{ start: seg.start, end: seg.end }], session.maxSpeech);
+  session.chain = session.chain.then(async () => {
+    for (const p of parts) {
+      try {
+        const a = Math.max(0, Math.round((p.start - seg.start) * core.SAMPLE_RATE));
+        const b = Math.min(seg.samples.length, Math.round((p.end - seg.start) * core.SAMPLE_RATE));
+        const r = await core.recognizeSegment(ctx.recognizer, seg.samples.subarray(a, b));
+        const text = (r.text || '').trim();
+        if (!text) continue; // 無音・空認識はライブ表示にも結果にも出さない
+        const item = { start: p.start, end: p.end, text };
+        session.segments.push(item);
+        session.emit({ kind: 'seg', ...item });
+      } catch (e) {
+        // 1 区間の失敗でセッション全体は止めない
+        session.emit({ kind: 'segError', message: e.message || String(e) });
+      }
+    }
+  });
 }
 
 // ---- 各オペレーション ----
@@ -155,6 +183,62 @@ const OPS = {
     const samples = await core.decodeToPcm(filePath, { startSeconds: start, maxSeconds: Math.max(0.05, end - start) });
     core.writePcmToWav(samples, outPath);
     return { wavPath: outPath };
+  },
+
+  // ---- リアルタイム文字起こし（マイク入力の専用ワーカーとして使う） ----
+
+  // セッション開始。応答は rtStop まで保留し、確定区間をこの rid の event で送り続ける。
+  async rtSession({ vad, pcmPath, wavPath }, emit) {
+    if (rt) throw new Error('リアルタイムセッションは既に実行中です');
+    rt = {
+      segmenter: new core.RealtimeSegmenter(vadFor(vad || {})),
+      fd: fs.openSync(pcmPath, 'w'), // 録音 PCM。メモリに全保持せず逐次追記する
+      pcmPath,
+      wavPath,
+      samples: 0,
+      maxSpeech: core.normalizeVadOptions(vad || {}).maxSpeechDuration,
+      chain: Promise.resolve(),
+      segments: [],
+      emit,
+      stopped: false,
+      finish: null,
+    };
+    await new Promise((res) => { rt.finish = res; });
+    return { ok: true };
+  },
+
+  // PCM チャンク受領（advanced serialization 経由の Float32Array）。
+  // 録音ファイルへ追記し、VAD が確定した区間を認識キューへ積む。
+  rtFeed({ chunk }) {
+    if (!rt || rt.stopped) return { dropped: true };
+    const arr = chunk instanceof Float32Array ? chunk : Float32Array.from(chunk || []);
+    if (!arr.length) return { ok: true };
+    fs.writeSync(rt.fd, Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength));
+    rt.samples += arr.length;
+    for (const s of rt.segmenter.feed(arr)) rtEnqueue(s);
+    return { ok: true };
+  },
+
+  // 停止。末尾を flush → 残り認識の完了を待ち、録音を WAV 化して結果を返す。
+  async rtStop() {
+    if (!rt) throw new Error('リアルタイムセッションがありません');
+    rt.stopped = true; // 以降に届いた rtFeed は捨てる（flush 後の投入を防ぐ）
+    for (const s of rt.segmenter.flush()) rtEnqueue(s);
+    await rt.chain;
+    fs.closeSync(rt.fd);
+    const session = rt;
+    rt = null;
+    try {
+      core.convertPcmFileToWav(session.pcmPath, session.wavPath);
+    } finally {
+      session.finish(); // WAV 化に失敗しても rtSession の応答は必ず解放する
+    }
+    fs.rmSync(session.pcmPath, { force: true });
+    return {
+      segments: session.segments,
+      duration: session.samples / core.SAMPLE_RATE,
+      wavPath: session.wavPath,
+    };
   },
 };
 

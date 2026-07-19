@@ -123,11 +123,14 @@ let pool = null;        // [{ proc, rpcs:Map }]
 let poolReady = null;   // 全 init 完了の Promise
 let ridSeq = 0;
 
-function spawnWorker(initArgs) {
+function spawnWorker(initArgs, forkOptions = {}) {
   const proc = fork(path.join(__dirname, 'asrWorker.js'), [], {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
-    // 埋め込みはプレーン配列で渡すため通常シリアライズで十分（外部バッファ回避）
+    // 既定は JSON シリアライズ（埋め込みはプレーン配列で渡すため十分）。
+    // リアルタイムの PCM チャンク（Float32Array）を送るワーカーだけ
+    // forkOptions で advanced（構造化クローン）を指定する。
+    ...forkOptions,
   });
   const w = { proc, rpcs: new Map(), readyResolve: null, readyReject: null };
   w.ready = new Promise((res, rej) => { w.readyResolve = res; w.readyReject = rej; });
@@ -176,6 +179,149 @@ function rpc(w, op, args, onEvent) {
   });
 }
 
+// ==== リアルタイム文字起こし（マイク入力） ====
+// バッチのプールとは独立した軽量ワーカーを 1 個使う（認識器と VAD のみ。
+// ノイズ除去・話者系モデルは載せない）。録音開始を待たせないため、renderer が
+// リアルタイムモードへ入った時点で rt:prepare により事前起動し、セッションを
+// 跨いで保持する。モード離脱（rt:release）と、辞書・高精度など認識設定が
+// 変わる操作（destroyRtWorker 併記箇所）で破棄して陳腐化を防ぐ。
+let rtWorker = null;          // spawnWorker の戻り値（事前準備済みを使い回す）
+let rtSessionActive = false;  // 録音セッション実行中か（バッチとの排他はこれで判定）
+let rtSessionPromise = null;  // rtSession RPC（セッション終了まで pending）
+let rtRecording = null;       // { pcmPath, wavPath }
+let activeBatchJobs = 0;      // 実行中のファイル文字起こし数（リアルタイムと排他）
+
+function destroyRtWorker() {
+  if (rtWorker) { try { rtWorker.proc.kill(); } catch (_) { /* ignore */ } }
+  rtWorker = null;
+  rtSessionActive = false;
+  rtSessionPromise = null;
+  if (rtRecording) {
+    fs.rm(rtRecording.pcmPath, { force: true }, () => {});
+    rtRecording = null;
+  }
+}
+
+// リアルタイム用ワーカーを起動して init 完了まで待つ。準備済みなら使い回す。
+async function ensureRtWorker() {
+  if (rtWorker) {
+    await rtWorker.ready;
+    return rtWorker;
+  }
+  const { baseDir, ready } = resolveModels();
+  if (!ready) throw new Error('モデルが未取得です。先にダウンロードしてください。');
+  const { modelDir, vadPath } = modelManager.pathsFor(baseDir);
+  const rs = currentRecognizerSettings();
+  const w = spawnWorker(
+    { modelDir, vadPath, hotwordsFile: rs.file, hotwordsScore: rs.score, beamSearch: rs.highAccuracy },
+    { serialization: 'advanced' },
+  );
+  rtWorker = w;
+  // 待機中（RPC なし）の異常終了でも参照を残さない
+  w.proc.on('exit', () => { if (rtWorker === w) destroyRtWorker(); });
+  try {
+    await w.ready;
+  } catch (e) {
+    if (rtWorker === w) destroyRtWorker();
+    throw e;
+  }
+  return w;
+}
+
+// モード進入時の事前準備（録音開始を即時にする）
+ipcMain.handle('rt:prepare', async () => {
+  await ensureRtWorker();
+  return { ok: true };
+});
+
+// モード離脱時にメモリを解放する。録音セッション中は何もしない。
+ipcMain.handle('rt:release', () => {
+  if (!rtSessionActive) destroyRtWorker();
+  return { ok: true };
+});
+
+// Electron IPC 経由のチャンクを Float32Array に揃える（構造化クローンの型ゆらぎ対策）
+function toFloat32(chunk) {
+  if (chunk instanceof Float32Array) return chunk;
+  if (ArrayBuffer.isView(chunk)) {
+    return new Float32Array(chunk.buffer, chunk.byteOffset, Math.floor(chunk.byteLength / 4));
+  }
+  if (chunk instanceof ArrayBuffer) return new Float32Array(chunk);
+  return null;
+}
+
+ipcMain.handle('rt:start', async (event, opts = {}) => {
+  if (rtSessionActive) throw new Error('リアルタイム文字起こしは既に実行中です');
+  if (activeBatchJobs > 0) throw new Error('ファイルの文字起こし中は開始できません。完了を待ってください。');
+  // 通常は rt:prepare 済みのワーカーを即使う（未準備ならここで起動して待つ）
+  const w = await ensureRtWorker();
+  fs.mkdirSync(previewDir, { recursive: true });
+  const id = Date.now();
+  rtRecording = {
+    pcmPath: path.join(previewDir, `rec-${id}.pcm`),
+    wavPath: path.join(previewDir, `rec-${id}.wav`),
+  };
+  rtSessionActive = true;
+  rtSessionPromise = rpc(w, 'rtSession', { vad: opts.vad || {}, ...rtRecording }, (ev) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('rt:segment', ev);
+  });
+  // ワーカーの異常終了（設定変更による強制終了を含む）を renderer に通知する。
+  // 正常停止後や別セッションの失敗を拾わないよう、ワーカーの同一性を確認する。
+  rtSessionPromise.catch((e) => {
+    if (rtWorker !== w) return;
+    destroyRtWorker();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('rt:error', { message: e.message || String(e) });
+    }
+  });
+  return { ok: true };
+});
+
+// 高頻度・応答不要の PCM チャンク経路（100ms ≒ 6.4KB）
+ipcMain.on('rt:feed', (event, chunk) => {
+  if (!rtWorker) return;
+  const arr = toFloat32(chunk);
+  if (arr && arr.length) rpc(rtWorker, 'rtFeed', { chunk: arr }).catch(() => {});
+});
+
+ipcMain.handle('rt:stop', async () => {
+  if (!rtWorker || !rtSessionActive) throw new Error('リアルタイム文字起こしは実行されていません');
+  try {
+    const result = await rpc(rtWorker, 'rtStop', {});
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return {
+      ...result,
+      name: `録音_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}.wav`,
+    };
+  } finally {
+    // ワーカーは次の録音に備えて保持する（破棄はモード離脱・設定変更・終了時）。
+    // 録音 WAV は結果として参照されるため消さない。
+    rtSessionActive = false;
+    rtSessionPromise = null;
+    rtRecording = null;
+  }
+});
+
+ipcMain.handle('rt:cancel', () => {
+  const wavPath = rtRecording ? rtRecording.wavPath : null;
+  destroyRtWorker();
+  if (wavPath) fs.rm(wavPath, { force: true }, () => {});
+  return { ok: true };
+});
+
+// 録音 WAV は一時領域（終了時に削除）にあるため、残したい場合はここで複製する
+ipcMain.handle('rt:saveWav', async (event, wavPath, suggestedName) => {
+  const base = String(suggestedName || 'recording').replace(/[\\/:*?"<>|]/g, '_');
+  const res = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: `${base}.wav`,
+    filters: [{ name: 'WAV', extensions: ['wav'] }],
+  });
+  if (res.canceled) return { saved: false };
+  await fs.promises.copyFile(wavPath, res.filePath);
+  return { saved: true, path: res.filePath };
+});
+
 // ---- IPC ----
 ipcMain.handle('model:status', () => {
   const r = resolveModels();
@@ -188,6 +334,7 @@ ipcMain.handle('model:download', async (event) => {
     event.sender.send('model:progress', p);
   });
   destroyPool(); // モデルを読み直させる
+  destroyRtWorker();
   return { ready: modelManager.isComplete(baseDir) };
 });
 
@@ -206,6 +353,7 @@ ipcMain.handle('hotwords:set', (event, { text, score, enabled }) => {
   if (typeof enabled === 'boolean') s.hotwordsEnabled = enabled;
   writeSettings(s);
   destroyPool(); // 次回の文字起こしで新しい辞書を読み込ませる
+  destroyRtWorker(); // 実行中のリアルタイムセッションも新設定で作り直させる
   return { ok: true, count: words.length };
 });
 // 高精度モード（beam search）の ON/OFF。辞書とは独立。即時保存してプールを作り直す。
@@ -214,6 +362,7 @@ ipcMain.handle('accuracy:set', (event, highAccuracy) => {
   s.highAccuracy = !!highAccuracy;
   writeSettings(s);
   destroyPool();
+  destroyRtWorker();
   return { ok: true, highAccuracy: s.highAccuracy };
 });
 
@@ -330,12 +479,16 @@ ipcMain.handle('clip:segment', async (event, filePath, start, end) => {
 });
 
 ipcMain.handle('transcribe:file', async (event, filePath, jobId, opts = {}) => {
-  await ensurePool();
-  fs.mkdirSync(previewDir, { recursive: true });
+  // リアルタイム実行中は CPU を取り合うため排他にする（rt:start 側も逆向きに確認する）。
+  // 準備済みのアイドルワーカーは対象外（録音セッション中だけ弾く）。
+  if (rtSessionActive) throw new Error('リアルタイム文字起こしの実行中は開始できません。先に録音を停止してください。');
+  activeBatchJobs++;
   const pcmPath = path.join(previewDir, `work-${jobId}-${Date.now()}.pcm`);
   const sendProgress = (ratio) => mainWindow && mainWindow.webContents.send('transcribe:progress', { jobId, ratio });
 
   try {
+    await ensurePool();
+    fs.mkdirSync(previewDir, { recursive: true });
     // Stage A: 1 ワーカーでデコード+重なり検出+ノイズ除去+VAD → 共有 PCM と区間境界
     sendProgress(0.02);
     const vadOpts = opts.vad || {};
@@ -394,6 +547,7 @@ ipcMain.handle('transcribe:file', async (event, filePath, jobId, opts = {}) => {
       filePath, name: path.basename(filePath), jobId,
     };
   } finally {
+    activeBatchJobs--;
     cancelled.delete(jobId);
     fs.rm(pcmPath, { force: true }, () => {});
   }
@@ -534,6 +688,7 @@ ipcMain.handle('app:dataInfo', () => ({
 // データ初期化：モデル・設定・辞書・一時ファイルを削除（アプリ本体は残す）。
 ipcMain.handle('app:wipeData', async () => {
   destroyPool(); // モデル .onnx のロックを解放
+  destroyRtWorker();
   await new Promise((r) => setTimeout(r, 250)); // ワーカー終了とロック解放を待つ
   removeKnownData();
   return { ok: true };
@@ -542,6 +697,7 @@ ipcMain.handle('app:wipeData', async () => {
 // 完全アンインストール：既知データを消し、quit 後に残りと本体を除去して終了する。
 ipcMain.handle('app:uninstall', async () => {
   destroyPool();
+  destroyRtWorker();
   await new Promise((r) => setTimeout(r, 250));
   removeKnownData();
   if (process.platform === 'win32') scheduleWindowsUninstall();
@@ -592,6 +748,7 @@ ipcMain.handle('update:download', async () => {
 ipcMain.handle('update:install', () => {
   if (!updaterEnabled()) return { ok: false, reason: 'disabled' };
   destroyPool(); // ワーカーを止めてからインストーラへ
+  destroyRtWorker();
   // isSilent=false（インストーラUIを表示）, isForceRunAfter=true（更新後に再起動）
   setImmediate(() => autoUpdater.quitAndInstall(false, true));
   return { ok: true };
@@ -618,6 +775,9 @@ function createWindow() {
     },
   });
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  // リロード等で renderer が消えると音声チャンクの供給元が失われるため、
+  // 取り残されたリアルタイムセッションは読み込みのたびに破棄する（初回は no-op）。
+  mainWindow.webContents.on('did-finish-load', () => destroyRtWorker());
 }
 
 app.whenReady().then(() => {
@@ -632,6 +792,7 @@ app.whenReady().then(() => {
 });
 app.on('before-quit', () => {
   destroyPool();
+  destroyRtWorker();
   // 一時ファイルを掃除
   try { fs.rmSync(previewDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }
 });

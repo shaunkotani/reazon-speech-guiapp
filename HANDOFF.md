@@ -1,188 +1,370 @@
-# 引き継ぎドキュメント（ReazonSpeech ローカル文字起こしアプリ）
+# HANDOFF — モコシ（ReazonSpeech ローカル文字起こしアプリ）
 
-> 新しいセッションはまずこのファイルと `README.md` を読むこと。
-> 実装の詳細な理由・ハマりどころはコード内コメントにも記載済み。
+> 新しいセッションでは、まず本書と `README.md` を読むこと。
+> 本書は **2026-07-19 / v1.6.0（リアルタイム文字起こし追加）** の実装を基準に更新している。
+> `release/` は gitignore 対象で古い成果物も残るため、実装状態の判断には `package.json` とソースを使うこと。
 
-## 1. これは何か / ゴール
-- ReazonSpeech の **k2 モデル**を **sherpa-onnx** で動かす、**完全ローカル・オフライン**の日本語文字起こし **Electron デスクトップアプリ**。
-- ゴール: **Python も ReazonSpeech も入れていない端末で、誰でもダブルクリックで使える**こと。
-- 対象OS: **macOS(Apple Silicon)＋Windows**。**Windows は CI（`release.yml`）でビルド→GitHub Releases 配布中。現行 v1.3.0**。mac は dmg のローカルビルドのみ。
-- ライセンス: アプリ Apache-2.0 / モデル・sherpa-onnx も Apache-2.0。
-- **配布方針（2026-07 更新）**: Windows は **Microsoft Store（AppX/MSIX）へ移行予定**（署名を Store に任せる）。→ 第6.5章・`docs/MICROSOFT_STORE.md`。
+## 1. 現在地
 
-## 2. 技術スタック
-| 層 | 採用 |
+- アプリ名は **モコシ**。ReazonSpeech k2-v2 を sherpa-onnx で動かす、日本語文字起こし用 Electron デスクトップアプリ。
+- 認識・VAD・ノイズ除去・話者埋め込みは CPU 上でローカル実行し、Python は不要。
+- 通信が発生するのは、主にモデル初回取得と GitHub Releases の更新確認時。モデル取得後の文字起こし自体はオフラインで動く。
+- ソースの現行バージョンは **v1.5.0**（`package.json` と tag `v1.5.0`）。
+- 対象ビルド:
+  - Windows x64: NSIS `.exe`。タグ `v*` の push で `.github/workflows/release.yml` が GitHub Releases へ発行する。
+  - macOS Apple Silicon: arm64 `.dmg` のローカルビルド。
+- Microsoft Store（AppX/MSIX）移行は方針として決定済みだが、**まだ未実装**。現行コードと CI は NSIS + GitHub Releases のまま。詳細は `docs/MICROSOFT_STORE.md`。
+- ライセンス: アプリ本体は Apache-2.0。アプリ内の「ⓘ 情報」から主要ライセンスと NOTICE を表示できる。
+
+### バージョン別の主な実装
+
+| バージョン | 主な変更 |
 |---|---|
-| デスクトップ | Electron 42 + electron-builder（`.dmg`/`.exe`） |
-| 推論 | **sherpa-onnx-node**（ネイティブ addon・CPU・Python不要） |
-| ASR モデル | reazonspeech-k2-v2（Zipformer transducer, int8, 約150MB） |
-| 音声デコード | ffmpeg-static 同梱（任意フォーマット→16kHz mono） |
-| 発話分割 | Silero VAD + pyannote segmentation（重なり補正） |
-| ノイズ除去 | GTCRN（gtcrn_simple.onnx, 約0.5MB） |
-| 話者埋め込み | wespeaker ResNet34（25MB, 話者識別用） |
-| 音声再生 | `app-media://` カスタムプロトコルで `<audio>` 配信 |
+| v1.1.0 | TXT・コピーへ時刻プレフィックスを追加 |
+| v1.2.0 | データ初期化・NSIS 完全アンインストール |
+| v1.3.0 | GitHub Releases 経由の自動アップデート |
+| v1.4.0 | VAD 設定、結果音声・区間再生、設定を変えて再実行 |
+| v1.5.0 | 重なり音声の再解析、名前付き VAD プリセット |
+| v1.6.0 | リアルタイム文字起こし（マイク） |
 
-## 3. ディレクトリ構成
-```
+## 2. 技術構成
+
+| 層 | 現行実装 |
+|---|---|
+| デスクトップ | Electron 42.5.1 / electron-builder 26.15.3 / 素の HTML・CSS・JS |
+| 自動更新 | electron-updater 6.8.9 + GitHub Releases |
+| 推論 | sherpa-onnx-node 1.13.3、CPU、子プロセスのワーカープール |
+| ASR | reazonspeech-k2-v2、Zipformer Transducer、int8 ONNX 3ファイル + `tokens.txt` |
+| 音声デコード | 同梱 LGPL FFmpegを優先。無ければ ffmpeg-static、最後に PATH 上の `ffmpeg` |
+| 発話分割 | Silero VAD。アプリ側でも最大区間長を厳密に適用 |
+| 重なり補正 | pyannote segmentation + WeSpeaker + 複数時間窓の再認識 |
+| ノイズ除去 | GTCRN（`gtcrn_simple.onnx`）、原音とのブレンドで強度調整 |
+| リアルタイム | Silero VAD ストリーミング + 既存オフライン認識器を専用ワーカーで逐次実行 |
+| 話者タグ付け | WeSpeaker ResNet34 埋め込み + 手本への最近傍割当 |
+| 音声再生 | IPC で読み込んだ Blob URL が基本。`app-media://` はフォールバック・生成クリップ用 |
+
+### 処理プロセス
+
+1. renderer がファイルとジョブ単位の設定を IPC で main に渡す。
+2. main が `CPU コア数 - 1`、最大4個の Node 子プロセスを作る。
+3. 先頭ワーカーが FFmpeg デコード、必要なら原音の重なり検出、ノイズ除去、Silero VAD を行い、16 kHz mono float32 PCM を一時ファイルへ保存する。
+4. `shared/overlap.js` が VAD 区間を最大長以内へ分割し、重なり補正が有効なら再認識候補を追加する。
+5. main が認識区間をラウンドロビンで全ワーカーへ配り、ASR を並列実行する。
+6. 重なり区間は複数候補の編集距離による合意度で採用結果を決め、通常区間と時刻順に統合する。
+7. 話者タグ付けをユーザーが開始したときだけ、同じ区間列の WeSpeaker 埋め込みを遅延計算する。
+
+ワーカー間で大きな `Float32Array` を IPC 転送せず、raw PCM 一時ファイルを共有している。話者埋め込みだけは `Array.from()` でプレーン配列化して返す。
+
+## 3. ディレクトリと責務
+
+```text
 src/
-  core/asr.js          推論コア（decode/denoise/VAD/認識/埋め込み/クラスタ呼び出し/raw PCM I/O）
-  main/main.js         Electron メイン（ウィンドウ/IPC/ワーカープール/プロトコル）
-  main/asrWorker.js    子プロセス（純Node）。汎用RPCで prepare/processBatch/embedBatch/clip/preview/decodePcm
-  main/preload.js      contextBridge（window.api.*）
-  main/modelManager.js モデルの所在解決・初回ダウンロード
-  renderer/            UI（index.html / renderer.js / styles.css）※バンドラなしの素のJS
-  shared/export.js     TXT/SRT/VTT/JSON 整形（話者名対応）
-  shared/cluster.js    話者クラスタリング＆手本ベース割当（純JS・ネイティブ非依存）
-  shared/overlap.js    厳密な区間上限・重なり再認識候補・合意選択（純JS）
+  core/asr.js
+    FFmpegデコード、認識器/VAD/GTCRN/WeSpeaker/pyannote生成、PCM・WAV I/O
+  main/main.js
+    BrowserWindow、IPC、ワーカープール、文字起こし統括、設定、更新、メンテナンス
+  main/asrWorker.js
+    子プロセスRPC。prepare/processBatch/decodePcm/embedBatch/preview/clip
+  main/modelManager.js
+    モデル所在解決、完全性確認、初回ダウンロード
+  main/mediaProtocol.js
+    app-media:// の単純ストリーム配信。シーク用途には使わない
+  main/preload.js
+    contextBridge の `window.api.*`
+  renderer/
+    index.html / renderer.js / styles.css。バンドラなし
+    recorder-worklet.js はリアルタイム用 AudioWorklet（100msごとのPCMチャンク送出）
+  shared/export.js
+    TXT/SRT/VTT/JSON、同一話者区間の統合
+  shared/cluster.js
+    凝集クラスタリング、手本ベース割当、話者不明判定
+  shared/overlap.js
+    厳密な区間分割、重なり検出、再認識候補生成、合意選択
+
 scripts/
-  test-pool.js         並列プール＋話者分離のCLI検証
-  test-enroll.js       後付けタグ付けフロー（文字起こし→遅延埋め込み→手本割当）のCLI検証
-  test-pipeline.js     単一ワーカーのパイプライン検証
-models/                gitignore。dev時に置くと優先使用（無ければ userData に初回DL）
-release/               ビルド成果物（.dmg 等）
+  test-pipeline.js             単一プロセスのCLI文字起こし
+  test-pool.js                 並列ASR + 埋め込み + クラスタリング
+  test-enroll.js               遅延埋め込み + 手本割当
+  test-hotwords.js             greedy と辞書付きbeamの比較
+  test-overlap.js              重なり補正の純JS回帰
+  test-realtime.js             擬似ストリーム投入の遅延実測（core直接・調査用）
+  test-realtime-worker.js      本番asrWorkerをforkするリアルタイム経路の回帰
+  test-renderer-playback.js    renderer実駆動の画面回帰（認識はスタブ）
+  test-media-seek.js           app-media再生の調査用ハーネス
+  fetch-ffmpeg.js              Windows/Linux用LGPL FFmpegの取得
+
+models/       開発用モデル。gitignore。全モデルが揃っている場合だけ優先使用
+samples/      ローカル検証音声。gitignore
+vendor/       配布用LGPL FFmpeg。実行ファイルはgitignore
+release/      ビルド成果物。gitignore。古い成果物を実装の根拠にしない
+licenses/     アプリ内で表示するライセンス全文とNOTICE
+docs/         Microsoft Store計画、旧Azure署名手順
 ```
 
-## 4. ⚠️ 重要なハマりどころ（必読・再発防止）
-1. **`sherpa-onnx`(npm) は WASM 専用** → VAD がファイルパスから読めない。必ず **`sherpa-onnx-node` + プラットフォーム別ネイティブ**（`sherpa-onnx-darwin-arm64` 等・optionalDependencies）を使う。
-2. **Electron は「外部バッファ」を全面禁止**（`ELECTRON_RUN_AS_NODE` でも同じ）。ネイティブ addon が外部バッファを返す箇所で `External buffers are not allowed` になる。対処:
-   - `vad.front(false)`（enableExternalBuffer=false）
-   - `extractor.compute(stream, false)`
-   - `denoiser.run({..., enableExternalBuffer:false})`
-   - **`sherpa.readWave()` は使用不可**（外部バッファを返す）→ ワーカー間 PCM 共有は **raw float32 の自前 I/O**（`core.writePcmRaw`/`readPcmRaw`）。
-   - プロセス間で `Float32Array` を渡さない（埋め込みは `Array.from()` でプレーン配列化して IPC）。
-3. **重い推論は必ず子プロセス**（`ELECTRON_RUN_AS_NODE=1` で fork）。メインで直接呼ぶと外部バッファで死ぬ＆UIが固まる。
-4. **VAD区間先頭の語落ち** → 各区間の前後に 0.3秒無音パディング（`padSamples`）。
-5. **HuggingFace は相対パスへリダイレクト**する → ダウンロードは `new URL(location, base)` で解決（`modelManager.downloadFile`）。
-6. **ffmpeg-static のパス**はパッケージ後 asar 内になる → `app.asar`→`app.asar.unpacked` に置換（`resolveFfmpegPath`）。asarUnpack 対象: ffmpeg-static / sherpa-onnx-node / sherpa-onnx-*。
-7. **`app-media:` スキームの `<audio>` はシーク不可**（protocol.handle の制約。Range を 206 で正しく返しても
-   ファイル途中の読み直しで `MEDIA_ERR_NETWORK` / `PIPELINE_ERROR_READ`。`fetch(app-media://…)` も
-   file:// ページからは Chromium が拒否）。→ シークが要る結果プレイヤーは **IPC `media:read` で中身を受け取り
-   Blob URL 化**（renderer `loadResultAudio`）。CSP の media-src に `blob:` が必要。頭から流すだけのクリップ再生は
-   app-media 直のままで良い。回帰テスト: `npx electron scripts/test-renderer-playback.js`（認識はスタブ・GUI 不要）／
-   `npx electron scripts/test-media-seek.js`。テストハーネスは**必ず watchdog で強制終了**させること
-   （例外→未処理 rejection→隠しウィンドウのままゾンビ化、が実際に起きた）。
+## 4. 実装済み機能
 
-## 5. 実装済み機能（すべて実機GUI検証済み）
-1. ファイルD&D／選択 → 文字起こし（タイムスタンプ付き）
-2. **取り込み音声のプレビュー再生**＋**ノイズ除去**（既定「なし」／弱/中/強・強度ブレンド）＋**除去後プレビュー**（先頭10秒クリップ）。プレビューWAVも `media:read` → Blob URL で再生する（`app-media:` 直指定は初回再生でも `MEDIA_ERR_NETWORK` になる環境がある）。
-3. エクスポート TXT/SRT/VTT/JSON＋コピー
-4. **並列ワーカープール**（CPUコア数-1、最大4）で VAD区間を分配し ASR を並列実行（長尺高速化）＋**中止ボタン**＋進捗表示（文字起こし・声紋計算の進捗バーに**推定残り時間**を表示 = renderer `etaText()`。序盤 ratio<0.08 は非表示）
-5. **話者識別（手本＝エンロールメント方式）**※UI刷新済み:
-   - 事前オプションは無し。文字起こしは埋め込み無しで軽量。
-   - 結果後に「話者でタグ付け」→ **声紋を遅延計算**（decodePcm+embedBatch を並列）→ タグ付けモード。
-   - 各区間に ▶（クリップ生成方式で再生）＋話者割当プルダウン（未割当/話者N/＋新しい話者）。話者名は編集可能。
-   - 確かな区間だけ手本を付け「手本で話者識別」→ 残りを最近傍で自動割当。**遠い区間は「話者不明」**（`UNKNOWN_THRESHOLD=0.75`）。
-   - クラスタリング（`clusterEmbeddings`）は残置だが既定フローでは未使用。
-6. モデル初回ダウンロード（k2 int8 / silero_vad / gtcrn / wespeaker / pyannote segmentation）。dev は `./models` 優先。
-7. **用語辞書（ホットワード）＋ modified_beam_search（C+A・実装済み・CLI検証済み）**:
-   - UI: 上部の「用語辞書（ホットワード）」パネル（`#hotwords`）に 1行1語で登録＋「効き具合」スライダー（hotwordsScore 0.5〜5）＋ON/OFF。保存で `userData/hotwords.txt` と `userData/settings.json` に永続化。
-   - 保存時に `destroyPool()` → 次回文字起こしで新辞書を読み込み。辞書が有効かつ非空なら `core.createRecognizer` が **`modified_beam_search` + `hotwordsFile` + `modelingUnit:'cjkchar'`** に自動切替（greedy に戻すのは辞書OFF/空のとき）。
-   - **検証結果（HANDOFF第8章の未確認点の答え）**: tokens.txt が文字ベースの k2 でも **`modelingUnit:'cjkchar'` を付ければ素の「1行1語」hotwords がそのまま効く**。`bpeVocab` は不要。`node scripts/test-hotwords.js samples/natural.wav "文字起こし" 3.0` で `文字を誇示→文字起こし` を確認済み。
-   - beam search 単体でも精度が上がる（辞書なしでも誤変換が減る例あり）。速度は greedy よりやや低下。
-8. **高精度モード（beam search）トグル（実装済み・CLI検証済み）**:
-   - 辞書とは独立したスイッチ。UI: 認識設定セクション上部の「高精度モード」チェックボックス（`#high-accuracy`）＋速度トレードオフの注記。変更で即 `accuracy:set` 保存＋`destroyPool()`。設定は `settings.highAccuracy`。
-   - `core.createRecognizer` の `beamSearch` フラグで実現（`useBeam = useHotwords || beamSearch`）。**チェックボックスは常に操作可**（ユーザー自身の希望値 `userHighAccuracy` を表示）。辞書ON時は beam が OR で強制されるため「オフでも高精度で動作します」の注記のみ表示（UI: `syncAccuracyUI()`、`savedDictActive`）。以前は辞書ON時にチェック固定＋無効化していたが「触れない」と分かりにくいため独立操作に変更。
-   - 検証: `beamSearch:true`（辞書なし）で `文字を誇示→文字起し` の矯正を確認（beam 単体効果）。
-9. **テキスト出力に時刻プレフィックス（v1.1.0）**: TXT 書き出しとクリップボードコピーの各行頭に `[HH:MM:SS --> HH:MM:SS]` を付与（`shared/export.js` の `timePrefix`/`formatClock`、renderer `plainTextWithSpeakers`）。SRT/VTT/JSON は元々時刻ありで不変。
-10. **データ初期化 / 完全アンインストール（v1.2.0）**: About モーダルの「メンテナンス」セクション。
-    - `app:wipeData` = モデル・設定・辞書・一時ファイル削除（本体は残す）。`app:uninstall` = 上記＋終了後に userData 全削除＋NSIS アンインストーラを `/S` 起動（Windows）。
-    - **削除前に必ず `destroyPool()`**（モデル .onnx のファイルロック解放）。`findWindowsUninstaller()` が `Uninstall *.exe` を探し、無ければ（dev/zip/**AppX**）「完全アンインストール」ボタンは自動 disabled。
-    - ⚠️ **Store(AppX) では NSIS 経路は無効**（自動 disabled）。data 初期化のみ有効。→ MICROSOFT_STORE.md §0-2。
-11. **自動アップデート（v1.3.0・electron-updater + GitHub Releases）**: ハイブリッド運用。
-    - 起動1.5秒後に静かにチェック → 更新ありで上部バナー通知 → ユーザーが DL（進捗%）→「再起動して更新」（`quitAndInstall`）。About に手動「更新を確認」。
-    - `autoDownload=false` / `autoInstallOnAppQuit=true`。`updaterEnabled()=app.isPackaged` でガード（IPC: `update:check`/`download`/`install`、イベント `update:status`/`update:progress`）。
-    - `build.publish` に GitHub provider を明示。**フィード `latest.yml` は CI の `--publish always` が生成**。
-    - ⚠️ **前提: リポジトリが public であること**（private だと updater が latest.yml を取得できない）。**Store(AppX) では無効化が必要**（`!process.windowsStore` を追加）→ MICROSOFT_STORE.md §0-1。
-12. **重なり音声の再解析**:
-    - 「会話・電話」プリセットで既定ON。人数（2〜4人）を指定する。標準/講演はOFF。
-    - worker `prepare` が原音を pyannote+wespeaker に通し、Silero VAD とは別に重なった話者区間を返す。pyannote は最初の会話ジョブで遅延生成する。
-    - `shared/overlap.js` が、重なりがあり話者境界がVAD境界から0.12秒以上変わる区間だけを再解析。開始を 0/0.08/0.16秒、終了を 0/0.5/0.75秒ずらした候補を認識し、編集距離の合意度が最大の実在候補を採用する。
-    - VAD の `maxSpeechDuration` は上限を超えることがあるため、アプリ側でも厳密に分割（境界は0.18秒重複）。正常区間は元の結果を維持する。
-    - `twospeaksample.mp3` の 2.47〜5.21秒は従来「ありがとうございます」だったが、補正後「どうしようどうしよう」を復元。純JS回帰は `npm run test:overlap`。
+### 4.1 取り込み・認識
 
-## 6. ビルド / 実行 / 検証
-```bash
-npm install
-npm start                              # dev 起動（./models があれば使用）
-npm run dist:mac                       # macOS(arm64) .dmg → release/
-npm run dist:win                       # Windows(x64) .exe ※Windows実機で実行
-node scripts/test-pool.js samples/twospeaksample.mp3 2  # 並列＋話者分離CLI検証
-node scripts/test-enroll.js                        # 後付けタグ付けフローCLI検証
-node scripts/test-hotwords.js samples/natural.wav "文字起こし,議事録" 3.0  # 辞書+beam検証（greedy比較）
-npm run test:overlap                    # 重なり補正の純JS回帰
-```
-- 成果物: `release/モコシ-1.0.0-arm64.dmg`、`release/mac-arm64/モコシ.app`（productName=「モコシ」）
-- 署名: ユーザーの Apple Development 証明書で自動署名（未公証→他人のMacでは Gatekeeper 警告）。
-- **アプリ名/アイコン**: 表示名は productName=「モコシ」（画面 `<h1>`・`<title>`・BrowserWindow title も「モコシ」）。npm の `name` は `reazonspeech` のまま。**userData は `app.setPath('userData', appData/'reazonspeech')` で固定**しているので、表示名を変えてもモデル/辞書/設定の保存先（`~/Library/Application Support/reazonspeech/`）は不変。
-- **アイコンの置き場/生成**: `build/icon.png`（正方形1024px）を置くと electron-builder が mac用 `.icns`・win用 `.ico` を自動生成。元画像から整形は `bash scripts/make-icon.sh build/icon-source.png`（白背景で中央寄せパディング）。dev の Dock は `app.dock.setIcon(build/icon.png)` で差し替え。`.gitignore` は `build/*` を無視しつつ `icon.png`/`icon-source.png` のみコミット対象。
+- 音声・動画ファイルのドラッグ＆ドロップ、複数選択。
+- 対応ダイアログ拡張子: wav/mp3/m4a/aac/flac/ogg/opus/mp4/mov/mkv/webm/avi。
+- ファイルごとに独立したジョブカードを作成する。
+- 元音声の先頭10秒プレビュー。
+- ノイズ除去は「なし」が既定。弱 0.5 / 中 0.8 / 強 1.0 を選べ、除去後の先頭10秒も試聴可能。
+- 並列認識、進捗、推定残り時間、中止。
+- 中止は実行中のネイティブ呼び出しを細粒度で止める方式ではなく、ワーカープールを終了して確実に止める。
 
-## 6.5 配布対応（ライセンス）— 2026-07 追加
-- **FFmpeg を LGPL 化**: 配布物は `vendor/ffmpeg/<platform>-<arch>/ffmpeg[.exe]`（LGPL v3 ビルド）を同梱し、`core.resolveFfmpegPath` がこれを最優先で使う。`ffmpeg-static`（GPL）は開発フォールバックのみで、**Windows 配布からは `build.win.files` で除外**。
-  - **Windows(x64) は配置済み**（BtbN win64-lgpl）。**mac(arm64) は未配置＝現状 GPL フォールバック**。配布前に `vendor/ffmpeg/darwin-arm64/ffmpeg` に LGPL mac ビルドを置くこと。
-  - `vendor/ffmpeg/**` は `asarUnpack`（実行ファイルは asar 内から起動不可のため）。
-- **アプリ内ライセンス画面**: ヘッダ「ⓘ 情報」→ `#about-modal`。IPC は `app:info` / `license:read`（`licenses/` をホワイトリスト読み）/ `license:openChromium`（同梱 `LICENSES.chromium.html` を既定アプリで開く）/ `shell:openExternal`。全文テキストは `licenses/{apache-2.0,lgpl-3.0,gpl-3.0,mit}.txt` と `licenses/NOTICE.txt`。
-- **コード署名 / Windows 配布 — 方針転換（2026-07）**: Azure Trusted Signing は**やめて Microsoft Store（AppX/MSIX）配布に切り替え**。Store 経由なら Microsoft が自動署名し SmartScreen 警告も出ない。**計画・手順・既存機能への影響は `docs/MICROSOFT_STORE.md`（必読）**。旧 Azure 手順（`electron-builder.signed.js` / `dist:win:signed` / `docs/CODE_SIGNING.md`）は**非推奨**として残置（Store 一本化時に撤去可）。
-  - ⚠️ **Store 化は自動アップデート(v1.3.0)と完全アンインストール(v1.2.0)に影響する**（Store が更新・アンインストールを担うため）。詳細と必要なコード変更（`updaterEnabled()` に `!process.windowsStore` を追加 等）は MICROSOFT_STORE.md §0 を参照。
-- **未確認/要対応**: (1) mac LGPL ffmpeg の配置と mac 実機ビルド。(2) GTCRN / wespeaker(VoxCeleb) モデルの再配布ライセンスの最終確認（NOTICE に「上流準拠」で記載中）。(3) **Microsoft Store 対応**（Partner Center 登録・Identity取得・`appx`ターゲット追加・updater/uninstall の Store 分岐）→ `docs/MICROSOFT_STORE.md` の TODO。(4) mac 署名/公証（Developer ID＋notarize）は別途。
+### 4.2 認識設定
 
-## 7. モデルURL（modelManager 参照）
-- k2: `https://huggingface.co/reazon-research/reazonspeech-k2-v2/resolve/main/{encoder,decoder,joiner}-epoch-99-avg-1.int8.onnx, tokens.txt`（**fp32版**は `.int8` を外したファイル名で同ディレクトリに存在）
-- VAD: `.../releases/download/asr-models/silero_vad.onnx`
-- 除去: `.../releases/download/speech-enhancement-models/gtcrn_simple.onnx`
-- 埋め込み: `.../releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx`
-- pyannote分割: HF `csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx`
+- **高精度モード**: 辞書がなくても `modified_beam_search` を使う。既定 OFF。
+- **用語辞書**: 1行1語。score 0.5〜5.0、既定 2.0。ONかつ1語以上なら beam search を自動的に使う。
+- ReazonSpeech k2-v2 は文字トークンモデルなので、辞書使用時は `modelingUnit: 'cjkchar'`。BPE vocab は不要。
+- 高精度モードと辞書設定は全ジョブ共通で `settings.json` / `hotwords.txt` に保存する。
+- 設定変更時は `destroyPool()` し、次の文字起こしで認識器を作り直す。
 
-## 8. 未着手・次にやろうとしていたこと（精度向上）
-- **A. modified_beam_search 復号 … 実装済み**（「高精度モード」トグルで辞書と独立に ON/OFF 可。辞書ON時は自動で強制 ON。第5章7・8参照）。
-- **C. ホットワード辞書 … 実装済み・実機GUIは未検証**（CLI検証済み。第5章7参照）。**残: Electron 実プロセスでのGUI通し確認**（外部バッファ懸念は低いが未確認。beam の返り値は文字列なので greedy と同じマーシャリング）。
-- **B. fp32 高精度モード**（未着手）… int8→fp32（encoder ~600MB・速度低下）。任意トグル案。fp32版ファイルは同ディレクトリに `.int8` を外した名前で存在。
-- **D. 音量正規化**（未着手・ffmpeg loudnorm/dynaudnorm）… 小さい/ムラのある音声に有効。デコード段に追加。
-- **F. nemo（619M・最高精度）を sherpa で動かせるか調査**（未着手）… 当たれば最大のジャンプだが不確実。
+### 4.3 発話区切り（VAD）
 
-**次アクション候補**:
-- **(最優先) Microsoft Store 対応** → `docs/MICROSOFT_STORE.md` の TODO（Partner Center 登録・`appx` 追加・updater/uninstall の Store 分岐）。方針転換で決定済み。
-- (1) 用語辞書を実機GUIで通し検証（保存→文字起こしで反映されるか）。(2) hotwordsScore の既定値（現状2.0）を実運用で調整。(3) 余力あれば D（音量正規化）。
-- 自動アップデート(v1.3.0)の実地確認: **リポジトリを public 化**した上で、旧バージョン→新バージョンの更新検知・DL・再起動適用を実機で確認。
+認識モデルは短い発話向けで、長い音声を1区間のまま渡すと出力が数文字へ潰れることがある。VAD 設定は単なる微調整ではなく、認識結果を大きく左右する。
 
-### 発話区間の分割（VAD）— 認識結果を最も左右するノブ
-**k2-v2 は短い発話で学習された RNN-T なので、1区間が長いと出力が数トークンに潰れる。**
-区間長は精度の微調整ではなく「文字が出るか消えるか」を決める。19秒の電話音声
-（`samples/twospeaksample.mp3`）を旧既定 `minSilence 0.5 / maxSpeech 20` で通すと、
-無音が無いため全体が1区間になり結果が「もう楽しかった」7文字に潰れた。実測:
-
-| プリセット | threshold | minSilence | minSpeech | maxSpeech | 方針 |
+| 組み込みプリセット | threshold | minSilence | minSpeech | maxSpeech | 重なり再解析 |
 |---|---:|---:|---:|---:|---|
-| standard | 0.50 | 0.20s | 0.15s | 6s | 精度と文のつながりの均衡 |
-| conversation | 0.70 | 0.10s | 0.20s | 3s | 短い会話区間・重なりの取りこぼしを優先 |
-| lecture | 0.45 | 0.35s | 0.15s | 8s | 語中分割を抑えつつ長区間化を防止 |
+| 標準 | 0.50 | 0.20秒 | 0.15秒 | 6秒 | OFF |
+| 会話・電話 | 0.70 | 0.10秒 | 0.20秒 | 3秒 | ON、既定2人 |
+| 講演・朗読 | 0.45 | 0.35秒 | 0.15秒 | 8秒 | OFF |
 
-`minSilence` 0.05s も実測した。区間数は増えるが、これは検出済み発話の分割位置だけを
-変えるため、VAD が除外した音声を直接復元するものではない。短い相槌には
-`minSpeechDuration` を下げる方が効く。0.05s までUIで設定できるが、語中分割が増えるので
-会話プリセットの既定は 0.10s とした。`twospeaksample.mp3` を新 conversation + 重なり再解析で
-通すと、従来落ちていた「どうしようどうしよう」を復元し、「今」等の短い区間も出力した。
+- 4スライダーと重なり設定をジョブ単位で変更できる。
+- 調整値は名前付きカスタムプリセットとして最大20件保存・更新・削除できる。
+- カスタムプリセット名は最大40文字。保存先は `settings.json` の `vadPresets`。
+- `core.normalizeVadOptions()` と main 側の正規化により、UI 外から来た値も範囲内へ丸める。
+- Silero VAD の `maxSpeechDuration` は実際には上限を超える場合があるため、`splitStrictSegments()` が必ず上限内に再分割する。境界の語落ち防止に 0.18秒重ねる。
+- 各認識区間にはさらに前後0.3秒の無音を付け、RNN-T の区間先頭の語落ちを抑える。
 
-- プリセット定義は `core/asr.js` の `VAD_PRESETS`（standard / conversation / lecture）。
-  **レンダラの `renderer.js` にも同じ表を持つ**（require できないため）ので、変更時は両方直す。
-- UI はジョブ単位（`.vad-row` のプリセット + `.vad-details` の4スライダー）。調整値は
-  名前付きカスタムプリセットとして最大20件まで `settings.json` の `vadPresets` に保存できる
-  （IPC: `vad-presets:get/save/delete`）。
-  値は `transcribe:file` の `opts.vad` → worker `prepare` へ流れ、`vadFor()` が
-  設定変更時だけ VAD を作り直す（**認識モデルは再ロードしない**ので切替は軽い）。
-- `normalizeVadOptions()` が範囲外・不正値を丸める（UI 以外から来ても壊れない）。
+組み込みプリセットの数値は `src/core/asr.js` と `src/renderer/renderer.js` に重複定義されている。変更時は必ず両方を同期すること。重なり再解析の既定値と画面注記は renderer 側だけにある。
 
-その他の感度ノブ:
-- VAD `threshold`(0.5): 下げると小声も拾う（過検出も増）
-- `minSpeechDuration`(standard 0.15s / conversation 0.20s): これより短い発話を無視（相槌/ノイズ除去）
-- recognizer `blankPenalty`: 上げると出力を促す（脱落減・挿入増リスク）
-- 各区間に 0.3秒パディング（`PAD_SEC`）
-- `createRecognizer` の `hotwordsScore`(既定2.0)/`maxActivePaths`(既定4): 辞書の効き具合と beam 探索幅
+### 4.4 重なり音声の再解析（v1.5.0）
 
-## 9. サンプル音声（samples/、gitignore）
-- `twospeaksample.mp3` **実録音の2人の電話（19秒）**。話者分離・VAD 検証の標準 fixture。
-  `test-pool.js` / `test-enroll.js` の既定入力。相槌が重なり無音がほぼ無いので、
-  VAD 設定の検証にもこれを使う（合成音声では長区間潰れが再現しない）。
-- `natural.wav` 1話者（自然なポーズ入り）／`long.m4a`／`test.wav`
-- 旧 `twospk.wav`（`say` の Kyoko/Otoya 合成）は**実聴で同一話者に聞こえ 2話者 fixture として機能しない**ため削除し、
-  `twospeaksample.mp3` に置き換えた。
-- 合成音声(`say`)は声が似ていて自動クラスタリングが効きにくい。**話者識別の検証は「人数指定 or 手本」で行うこと**（実音声なら自動でも分離する）。
+- 「会話・電話」で既定 ON。想定話者数を2〜4人から指定する。
+- pyannote + WeSpeaker の diarizer は重なり再解析を使う最初のジョブでだけ遅延生成する。
+- 重なり検出はノイズ除去前の原音、通常 ASR はノイズ除去後の PCM を使う。
+- 異なる話者区間が0.08秒以上重なった箇所を検出する。
+- 話者境界が VAD 境界から0.12秒以上変わり、0.45秒以上ある区間だけ補正候補にする。
+- 各候補は開始を 0 / 0.08 / 0.16秒ずらし、終了を 0 / 0.5 / 0.75秒短くして認識する。
+- 空でない実在候補同士の編集距離から合意度最大の候補を選ぶ。合意が弱い場合は通常 VAD の結果を維持する。
+- 補正採用区間は結果画面に「重なり補正」バッジを付ける。重なり解析だけ失敗した場合も通常の文字起こしは継続する。
+- `samples/twospeaksample.mp3` では、従来「ありがとうございます」だった 2.47〜5.21秒付近から「どうしようどうしよう」を復元した実績がある。
+
+### 4.5 結果・再生・やり直し
+
+- タイムスタンプ付き区間一覧と、入力ファイル全体のプレイヤーを表示する。
+- 各区間の ▶ は全体プレイヤーを開始時刻へシークし、終了時刻で停止する。
+- Chromium が入力形式を直接再生できない場合は、FFmpeg で区間 WAV を生成する方式へ自動フォールバックする。
+- 「設定を変えてやり直す」で、同じファイルを前回のノイズ除去・VAD 値を保ったまま設定画面へ戻せる。再実行前なら前の結果へ戻れる。
+- 失敗・中止時も設定画面へ戻り、条件を変えて再試行できる。
+- ジョブ作成時に結果側イベントハンドラを一度だけ登録している。`onJobDone()` で登録すると、再実行のたびに書き出し等が多重実行されるので避けること。
+
+### 4.6 話者タグ付け
+
+- 通常の文字起こしでは話者埋め込みを計算しない。
+- 結果後に「話者でタグ付け」を押すと、全区間の埋め込みを並列計算し、タグ付け UI を開く。
+- 各区間を「未割当 / 話者N / 新しい話者」へ手動割当でき、話者名も編集できる。
+- 確かな区間を手本として「手本で話者識別」を実行すると、残りを話者重心への最近傍で割り当てる。
+- コサイン距離が `UNKNOWN_THRESHOLD = 0.75` を超える区間は `話者不明`（speaker `-1`）。
+- 埋め込みキャッシュは main 内に最大10ジョブ保持する。
+- `clusterEmbeddings()` は CLI・旧フロー用に残るが、GUI の標準フローは手本ベース割当。
+
+### 4.7 コピー・書き出し
+
+- TXT / SRT / VTT / JSON とクリップボードコピー。
+- TXT とコピーは各行が `[HH:MM:SS --> HH:MM:SS] 話者名: 本文` 形式。話者タグ前は話者名なし。
+- SRT/VTT/JSON はミリ秒を含む時刻情報を持つ。
+- 「同じ話者をまとめる」は、連続する同一話者の区間をコピーと全書き出し形式で統合する。画面上の元区間は維持する。
+- 未割当と `話者不明` は、別人の可能性があるため統合しない。
+- 統合ロジックは renderer と `shared/export.js` に重複しているため、規則変更時は双方を同期すること。
+
+### 4.8 リアルタイム文字起こし（v1.6.0）
+
+マイク音声をローカルで逐次認識する。方式は「Silero VAD ストリーミング + 既存
+オフライン認識器」で、発話が区切れるごとに確定文を追記する（文字単位の逐次表示ではない）。
+実測遅延は発話終了から約 0.3〜1 秒、認識負荷は実時間の 3% 程度（int8 / greedy）。
+
+画面上部の**モード選択**（既定「ファイルから文字起こし」）で切り替える。ローカルモードは
+ドロップゾーン、リアルタイムモードは中央の録音開始ボタンとマイク・話し方の選択を表示する。
+録音中・仕上げ中はモード切替を無効化する。
+
+- 経路: renderer の `getUserMedia` + 16kHz `AudioContext` + AudioWorklet が
+  100ms（1600 サンプル）の Float32Array を `rt:feed` で main へ送り、main が
+  リアルタイム専用ワーカーへ転送する。16kHz 指定で Chromium がリサンプルするため
+  FFmpeg は使わない。
+- 専用ワーカーはバッチのプールと独立した 1 プロセス（認識器 + VAD のみの軽量構成）。
+  Float32Array を渡すため **fork の `serialization: 'advanced'`** を使う（プールは従来どおり JSON）。
+- `core.RealtimeSegmenter` が `collectVadSegments()` のストリーミング版。確定区間は
+  バッチと同じ `splitStrictSegments()` で上限内に分割してから認識する。
+  空テキストの区間は結果に含めない（バッチとの意図的な差異）。
+- 録音 PCM は一時ファイルへ逐次追記（メモリに全保持しない）。停止時に 16bit WAV 化して
+  **通常のジョブカードへ合流**する。再生・書き出し・話者タグ付け・
+  「設定を変えてやり直す」（= 録音 WAV をバッチパイプラインで再解析。ノイズ除去・
+  重なり再解析はここで適用）がそのまま使える。
+- 録音 WAV は一時領域にあるため、結果ツールバーの「録音を保存」で任意の場所へ複製できる。
+- 排他制御: **録音セッション実行中**はファイル文字起こし不可、逆も不可
+  （`activeBatchJobs` / `rtSessionActive`）。準備済みのアイドルワーカーは排他の対象にしない。
+- ワーカーは**リアルタイムモード進入時に `rt:prepare` で事前起動**し（録音開始を即時にするため）、
+  録音セッションを跨いで保持する。モード離脱時は `rt:release` で解放してメモリを返す。
+  辞書保存・高精度切替・モデル再取得・データ初期化・renderer 再読込・終了時にも破棄し
+  （`destroyRtWorker()` を `destroyPool()` と対で呼ぶ）、実行中セッションは `rt:error` で
+  renderer に通知される。
+- 話し方プリセット（組み込み3種 + 保存済みカスタム）を流用する。重なり再解析は
+  オフライン処理のためリアルタイムでは常に無効。
+- マイク許可: Electron は permission handler 未設定のため media 要求は自動許可される。
+  Windows は OS のマイクプライバシー設定に依存。macOS ビルド時は
+  `NSMicrophoneUsageDescription` と entitlements の追加が必要（未対応）。
+
+### 4.9 モデル・更新・メンテナンス
+
+- 必須モデルが足りなければ画面上部から一括取得する。開発時の `./models` は全ファイルが揃っている場合だけ優先する。
+- 自動更新はパッケージ済みアプリだけ有効。起動1.5秒後に確認し、更新ありならバナー表示、ユーザー操作でダウンロード、再起動して適用する。
+- `autoDownload = false` / `autoInstallOnAppQuit = true`。
+- About から手動更新確認、データ容量確認、データ初期化、完全アンインストールを実行できる。
+- データ初期化前はワーカーを止め、ONNX ファイルロックを解放する。
+- 完全アンインストールは Windows の NSIS インストール時だけ有効。`Uninstall *.exe` が無い dev / zip / macOS / AppX ではボタンを無効化する。
+
+## 5. 保存先とモデル
+
+表示名を変えても既存データを引き継げるよう、userData は `app.getPath('appData')/reazonspeech` に固定している。
+
+| パス | 内容 |
+|---|---|
+| `userData/models/` | 初回取得した全モデル |
+| `userData/hotwords.txt` | 1行1語の用語辞書 |
+| `userData/settings.json` | 辞書ON/OFF・score、高精度モード、VADプリセット |
+| `os.tmpdir()/reazonspeech-preview/` | preview WAV、clip WAV、共有PCM、リアルタイム録音WAV。終了時・初期化時に削除 |
+
+必須モデル:
+
+- `reazonspeech-k2-v2/{encoder,decoder,joiner}-epoch-99-avg-1.int8.onnx`
+- `reazonspeech-k2-v2/tokens.txt`
+- `silero_vad.onnx`
+- `gtcrn_simple.onnx`
+- `wespeaker_en_voxceleb_resnet34_LM.onnx`
+- `pyannote-segmentation.onnx`
+
+URL は `src/main/modelManager.js` を正とする。Hugging Face のリダイレクト先は相対 URL の場合があるため、`new URL(location, currentUrl)` で解決している。
+
+## 6. 重要な実装上の注意
+
+### sherpa-onnx と Electron の外部バッファ
+
+- npm パッケージは `sherpa-onnx` ではなく **`sherpa-onnx-node`** と OS 別 optional dependency を使う。
+- Electron 系プロセスでは native addon の外部バッファを使えない。以下の指定を消さないこと。
+  - VAD: `vad.front(false)`
+  - 話者埋め込み: `extractor.compute(stream, false)`
+  - GTCRN: `enableExternalBuffer: false`
+- `sherpa.readWave()` は使わず、FFmpeg と自前 raw float32 I/O を使う。
+- 重い推論は main/renderer で行わず、`ELECTRON_RUN_AS_NODE=1` の子プロセスへ置く。
+
+### 音声再生
+
+- `protocol.handle` の `app-media:` は、Range 対応を試してもシーク時に `MEDIA_ERR_NETWORK` / `PIPELINE_ERROR_READ` になった。
+- プレビューと結果プレイヤーは `media:read` で全内容を renderer へ渡し、Blob URL にする。CSP の `media-src` に `blob:` が必要。
+- `media:read` は1GB上限。超過・読込失敗時は `app-media:` へフォールバックするが、シークは不安定になり得る。
+- 結果音声自体を Chromium が扱えない場合は全体プレイヤーを隠し、区間 WAV 生成へ切り替える。
+- Electron の隠しウィンドウを使うテストは、例外時のゾンビ化を防ぐ watchdog を必ず残す。
+
+### FFmpeg とパッケージング
+
+- 解決順は `vendor/ffmpeg/<platform>-<arch>/` または packaged `resources/ffmpeg/...` → ffmpeg-static → system `ffmpeg`。
+- Windows x64 は `npm run dist:win` の pre script で BtbN の LGPL ビルドを取得する。`ffmpeg.exe` はリポジトリへコミットしない。
+- Windows 配布物では `node_modules/ffmpeg-static/ffmpeg.exe` を除外し、`extraResources` の LGPL 版を使う。
+- macOS arm64 の LGPL バイナリは未配置。現状は ffmpeg-static の GPL フォールバックになるため、外部配布前に `vendor/ffmpeg/darwin-arm64/ffmpeg` を用意する。
+- native addon と ffmpeg-static は asar 内から直接実行できないため `asarUnpack` 対象。packaged path の `app.asar` は `app.asar.unpacked` へ置き換える。
+
+### プールと設定変更
+
+- プールサイズは最大4。各ワーカーが ASR・VAD・GTCRN・WeSpeaker を持つので、数を増やすとメモリ使用量も増える。
+- pyannote diarizer は `prepare` 担当ワーカーにだけ遅延生成する。
+- 辞書・高精度モード・モデル・データ初期化など、認識器やモデルの再読込が必要な操作では `destroyPool()` を呼ぶ。
+  これらの操作ではリアルタイム専用ワーカーも古い設定のままになるため、必ず `destroyRtWorker()` を対で呼ぶこと。
+- VAD 設定だけの変更は `vadFor()` が VAD を作り直し、ASR モデルは再ロードしない。
+
+## 7. 開発・検証・ビルド
+
+```powershell
+npm ci
+npm start
+
+# モデル不要の回帰
+npm run test:overlap
+npm run test:renderer
+
+# ./models と samples が必要
+npm run test:realtime
+npm run test:cli -- samples/natural.wav
+node scripts/test-pool.js samples/twospeaksample.mp3 2
+node scripts/test-enroll.js
+node scripts/test-hotwords.js samples/natural.wav "文字起こし,議事録" 3.0
+
+# 配布ビルド
+npm run fetch:ffmpeg
+npm run dist:win
+npm run dist:mac
+```
+
+検証の意味:
+
+- `test:overlap`: 厳密分割、重なり検出、補正候補、合意選択の純JS回帰。
+- `test:renderer`: 元音声 Blob 再生、標準値、カスタムプリセット保存、会話プリセット、文字起こしオプション、全体・区間再生、やり直しをスタブ付きで実駆動する。
+- `test:realtime`: 本番 asrWorker を advanced serialization で fork し、100ms チャンク投入 → 確定区間イベント → 録音 WAV 生成までのリアルタイム経路を回帰する。
+- `scripts/test-realtime.js`: core 直接の擬似ストリームで遅延（VAD確定+認識）を実測する調査用。
+- `test:cli` / pool / enroll / hotwords: native addon とローカルモデルを使うため、環境依存で時間がかかる。
+
+`samples/twospeaksample.mp3` は19秒の実録2人電話で、VAD・重なり補正・話者処理の標準 fixture。無音が少なく相槌が重なるため、長区間が数文字へ潰れる問題を再現できる。`natural.wav` は1話者の辞書・通常認識確認に使う。
+
+### リリース
+
+- `package.json` の `build.publish` は `shaunkotani/reazon-speech-guiapp` の GitHub provider。
+- タグ `v*` を pushすると Windows CI が `npm run dist:win -- --publish always` を実行する。
+- electron-updater が必要とする `latest.yml` も publish 時に生成・添付される。
+- updater を GitHub Releases で使うにはリポジトリと Release asset をクライアントから取得可能にする必要がある。
+- 旧 Azure Trusted Signing 用の `electron-builder.signed.js`、`dist:win:signed`、`docs/CODE_SIGNING.md` は非推奨のまま残置している。
+
+## 8. 未完了・次の作業
+
+### 優先度高
+
+1. **Microsoft Store 対応**
+   - Partner Center で Identity を取得するまで appx 設定値は確定できない。
+   - `package.json` へ appx target と `dist:win:store` を追加する。
+   - `updaterEnabled()` を `app.isPackaged && !process.windowsStore` に変更し、Store ビルドでは更新 UI を Store 案内へ切り替える。
+   - AppX 上の ffmpeg、native addon、子プロセス、モデル取得、userData を sideload 実機で確認する。
+2. **配布ライセンスの仕上げ**
+   - macOS arm64 用 LGPL FFmpeg を配置して現行 v1.5.0 を実機ビルドする。
+   - GTCRN と WeSpeaker/VoxCeleb モデルの再配布条件を最終確認する。
+   - macOS の Developer ID 署名・notarize は未対応。
+3. **リリース経路の通し確認**
+   - 用語辞書を実 GUI で保存→文字起こしまで確認する。現状は CLI 検証済みで、renderer 回帰には辞書認識を含めていない。
+   - 旧バージョンから最新版への更新検知、download、`quitAndInstall` を配布環境で確認する。
+4. **リアルタイム文字起こしの実マイク確認**
+   - ワーカー経路は `test:realtime` で回帰済みだが、実マイクでの GUI 通し
+     （デバイス選択・レベルメーター・ライブ追記・停止→結果合流・録音保存・再解析）は
+     実機での確認が必要。
+
+### リアルタイムの拡張候補（Phase 2・未着手）
+
+- 発話中の仮表示（認識中バッファの定期再認識、またはストリーミング Zipformer モデルの導入）。
+- システム音声（ループバック）の取り込み。Electron の `setDisplayMediaRequestHandler` +
+  `audio: 'loopback'` が Windows で使え、オンライン会議の相手音声を拾える。
+- リアルタイムノイズ除去（GTCRN はストリーミング設計のため原理的に可能）。
+- macOS のマイク許可（`NSMicrophoneUsageDescription` / entitlements）。
+
+### 精度改善候補（未着手）
+
+- fp32 版 k2 モデルを選べる高精度モード。現行「高精度モード」は int8 + beam search であり、fp32 切替ではない。
+- FFmpeg の loudnorm / dynaudnorm による音量正規化。
+- NeMo 619M モデルを sherpa-onnx で利用できるかの調査。
+- hotwordsScore 既定値 2.0 の実音声での調整。
+
+## 9. 既知の制約
+
+- CPU 推論のみ。長尺、beam search、重なり再解析、話者埋め込みは処理時間とメモリを増やす。
+- 話者タグ付けは完全自動ではなく、信頼できる区間をユーザーが手本指定する設計。
+- 重なり補正の想定話者数は2〜4人で、pyannote の結果が常に正しいとは限らない。補正候補の合意が弱ければ通常結果へ戻す。
+- `media:read` は音声・動画全体をメモリへ載せる。1GB超は直接URLへフォールバックするため、全体再生・シークに制約が出る場合がある。
+- Microsoft Store 版は未実装。現行 `updaterEnabled()` は `app.isPackaged` だけを見ているので、AppX target を追加する前に必ず Store 分岐を入れる。

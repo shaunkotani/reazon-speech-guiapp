@@ -215,11 +215,11 @@ function clearAudioObjectUrl(audio, job, key) {
   }
 }
 
-function addJob(filePath) {
+function addJob(filePath, { name = '', deferPreview = false } = {}) {
   const jobId = ++jobSeq;
   const node = jobTpl.content.cloneNode(true);
   const el = node.querySelector('.job');
-  el.querySelector('.job-name').textContent = filePath.split(/[\\/]/).pop();
+  el.querySelector('.job-name').textContent = name || filePath.split(/[\\/]/).pop();
   el.querySelector('.job-status').textContent = '準備完了';
   jobsEl.prepend(el);
   jobs.set(jobId, { el, filePath, result: null });
@@ -233,8 +233,10 @@ function addJob(filePath) {
   const denoisedRow = el.querySelector('.denoised-row');
   const audioDenoised = el.querySelector('.audio-denoised');
 
-  // 元音声プレビュー（先頭10秒のクリップを生成して再生）
-  (async () => {
+  // 元音声プレビュー（先頭10秒のクリップを生成して再生）。
+  // リアルタイム録音の結果ジョブは設定画面を開くまで不要なうえ、生成が
+  // ワーカープールを起動してしまうため、deferPreview で遅延させる。
+  const ensureOriginalPreview = async () => {
     origStatus.textContent = '読み込み中…';
     try {
       const r = await window.api.preview(filePath, ++previewSeq, 0);
@@ -244,7 +246,9 @@ function addJob(filePath) {
     } catch (e) {
       origStatus.textContent = `読み込み失敗: ${e.message}`;
     }
-  })();
+  };
+  if (deferPreview) job._ensurePreview = ensureOriginalPreview;
+  else ensureOriginalPreview();
 
   // ノイズ除去の強さは「なし/弱/中/強」のセグメントボタンで選ぶ（ネイティブ
   // <select> のポップアップに依存しないので、どの状態でも必ず切り替えられる）。
@@ -475,6 +479,14 @@ function addJob(filePath) {
     const job = jobs.get(jobId);
     if (job.result) navigator.clipboard.writeText(plainTextWithSpeakers(job));
   });
+  // リアルタイム録音の結果ジョブのみ表示（録音 WAV は一時領域にあるため）
+  el.querySelector('.save-audio-btn').addEventListener('click', async () => {
+    const job = jobs.get(jobId);
+    if (!job.result) return;
+    const base = (job.result.name || 'recording').replace(/\.[^.]+$/, '');
+    try { await window.api.rtSaveWav(job.result.filePath, base); }
+    catch (e) { alert(`録音の保存に失敗: ${e.message}`); }
+  });
   el.querySelector('.audio-result').addEventListener('error', () => {
     // Chromium が扱えない形式。区間再生はクリップ方式へ、全体再生は隠す。
     const job = jobs.get(jobId);
@@ -482,6 +494,8 @@ function addJob(filePath) {
     job.fullAudioBroken = true;
     el.querySelector('.result-audio-row').classList.add('hidden');
   });
+
+  return jobId;
 }
 
 // 文字起こし済みのジョブを設定画面に戻す（別条件でやり直すため）。
@@ -490,6 +504,8 @@ function reopenSetup(jobId) {
   const job = jobs.get(jobId);
   const el = job.el;
   stopSegmentPlayback(job);
+  // 遅延させていた元音声プレビューを初回オープン時に生成する（リアルタイム録音由来）
+  if (job._ensurePreview) { job._ensurePreview(); job._ensurePreview = null; }
   el.querySelector('.audio-result').pause();
   el.querySelector('.job-result').classList.add('hidden');
   el.querySelector('.job-setup').classList.remove('hidden');
@@ -612,6 +628,8 @@ function onJobDone(jobId, result) {
   // 操作系のハンドラは addJob で一度だけ登録済み（やり直しでの二重登録を避けるため）。
   loadResultAudio(job);
   if (!result.segments.length) el.querySelector('.tag-btn').classList.add('hidden');
+  // リアルタイム録音由来のジョブは、やり直し後も「録音を保存」を出し続ける
+  el.querySelector('.save-audio-btn').classList.toggle('hidden', !job.isRecording);
 
   renderResult(jobId);
 }
@@ -947,6 +965,281 @@ function onJobError(jobId, err) {
   // 失敗・中止したら設定画面に戻し、条件を変えて再実行できるようにする
   job.el.querySelector('.job-setup').classList.remove('hidden');
   job.el.querySelector('.back-btn').classList.toggle('hidden', !job.result);
+}
+
+// ---- リアルタイム文字起こし（マイク） ----
+// renderer: getUserMedia + 16kHz AudioContext + AudioWorklet で 100ms ごとの
+// Float32Array チャンクを main へ送る。認識は main 側の専用ワーカーが行い、
+// 確定区間が rt:segment イベントで届く。停止すると録音 WAV と全区間が返り、
+// 通常のジョブカード（再生・書き出し・話者タグ付け・やり直し）へ合流する。
+(() => {
+  const deviceSel = $('#rt-device');
+  const vadSel = $('#rt-vad');
+  const startBtn = $('#rt-start');
+  const stopBtn = $('#rt-stop');
+  const statusEl = $('#rt-status');
+  const liveWrap = $('#rt-live-wrap');
+  const liveEl = $('#rt-live');
+  const elapsedEl = $('#rt-elapsed');
+  const meterBar = $('#rt-meter-bar');
+  const modeLocalBtn = $('#mode-local');
+  const modeRealtimeBtn = $('#mode-realtime');
+  const realtimeSection = $('#realtime');
+
+  let cap = null; // { stream, ctx, src, node, samples, peak, timer }
+  let mode = 'local'; // 既定はローカルファイル
+  let preparing = null; // rtPrepare の実行中 Promise
+
+  function setModeSwitchEnabled(on) {
+    modeLocalBtn.disabled = !on;
+    modeRealtimeBtn.disabled = !on;
+  }
+
+  // リアルタイムモードへ入った時点で専用ワーカーを事前起動し、録音開始を即時にする
+  async function prepareRt() {
+    if (mode !== 'realtime' || cap) return;
+    if (!modelReady) {
+      await refreshModelStatus();
+      if (!modelReady) { statusEl.textContent = 'モデルのダウンロード後に利用できます'; return; }
+    }
+    if (preparing) return preparing;
+    statusEl.textContent = '認識モデルを準備中…';
+    preparing = window.api.rtPrepare()
+      .then(() => {
+        // 準備中にローカルへ戻っていたら即解放する
+        if (mode === 'realtime') statusEl.textContent = '準備完了';
+        else window.api.rtRelease();
+      })
+      .catch((e) => { statusEl.textContent = `準備に失敗: ${e.message}`; })
+      .finally(() => { preparing = null; });
+    return preparing;
+  }
+
+  // 入力モード切替（ローカルファイル / リアルタイム）。録音中はボタンを無効化している。
+  function setMode(next) {
+    if (mode === next || cap) return;
+    mode = next;
+    modeLocalBtn.classList.toggle('is-active', next === 'local');
+    modeRealtimeBtn.classList.toggle('is-active', next === 'realtime');
+    dropzone.classList.toggle('hidden', next !== 'local');
+    realtimeSection.classList.toggle('hidden', next !== 'realtime');
+    if (next === 'realtime') {
+      prepareRt();
+    } else {
+      statusEl.textContent = '';
+      window.api.rtRelease(); // ワーカーを解放しメモリを返す（録音中は main 側で no-op）
+    }
+  }
+  modeLocalBtn.addEventListener('click', () => setMode('local'));
+  modeRealtimeBtn.addEventListener('click', () => setMode('realtime'));
+
+  // 話し方プリセット（組み込み3種 + 保存済みカスタム）。値は VAD_PRESETS を流用する。
+  function renderVadChoices() {
+    const cur = vadSel.value || 'standard';
+    vadSel.replaceChildren(
+      new Option('標準', 'standard'),
+      new Option('会話・電話', 'conversation'),
+      new Option('講演・朗読', 'lecture'),
+    );
+    customVadPresets.forEach((p) => vadSel.add(new Option(p.name, `custom:${p.id}`)));
+    vadSel.value = Array.from(vadSel.options).some((o) => o.value === cur) ? cur : 'standard';
+  }
+  renderVadChoices();
+  vadPresetViews.add({ render: renderVadChoices });
+  vadPresetsReady.then(renderVadChoices);
+
+  function rtVadOptions() {
+    const v = vadSel.value;
+    if (v.startsWith('custom:')) {
+      const p = customVadPresets.find((x) => `custom:${x.id}` === v);
+      if (p) {
+        // 重なり再解析はオフライン処理のためリアルタイムでは使わない
+        return {
+          preset: 'custom',
+          maxSpeechDuration: p.maxSpeechDuration,
+          minSilenceDuration: p.minSilenceDuration,
+          minSpeechDuration: p.minSpeechDuration,
+          threshold: p.threshold,
+        };
+      }
+    }
+    return { preset: v };
+  }
+
+  // マイク一覧。ラベルは一度マイク許可が下りるまで空のことがある
+  async function refreshDevices() {
+    try {
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      const cur = deviceSel.value;
+      deviceSel.replaceChildren(new Option('既定のマイク', ''));
+      devs.filter((d) => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default')
+        .forEach((d, i) => deviceSel.add(new Option(d.label || `マイク ${i + 1}`, d.deviceId)));
+      if (Array.from(deviceSel.options).some((o) => o.value === cur)) deviceSel.value = cur;
+    } catch (_) { /* 取得できなくても既定マイクで動ける */ }
+  }
+  refreshDevices();
+  navigator.mediaDevices.addEventListener('devicechange', refreshDevices);
+
+  function setIdleUi() {
+    startBtn.classList.remove('hidden');
+    startBtn.disabled = false;
+    stopBtn.classList.add('hidden');
+    deviceSel.disabled = false;
+    vadSel.disabled = false;
+    setModeSwitchEnabled(true);
+  }
+
+  async function cleanupCapture() {
+    if (!cap) return;
+    const c = cap;
+    cap = null; // 以降に届く worklet チャンクは捨てる
+    clearInterval(c.timer);
+    try { c.src.disconnect(); } catch (_) { /* ignore */ }
+    try { c.node.disconnect(); } catch (_) { /* ignore */ }
+    try { await c.ctx.close(); } catch (_) { /* ignore */ }
+    c.stream.getTracks().forEach((t) => t.stop());
+  }
+
+  startBtn.addEventListener('click', async () => {
+    if (cap) return;
+    if (!modelReady) {
+      await refreshModelStatus();
+      if (!modelReady) { alert('先にモデルをダウンロードしてください。'); return; }
+    }
+    startBtn.disabled = true;
+    setModeSwitchEnabled(false);
+    statusEl.textContent = 'マイクを準備中…';
+    let stream = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: deviceSel.value ? { exact: deviceSel.value } : undefined,
+          channelCount: 1,
+        },
+      });
+      refreshDevices(); // 許可後はラベル付きで一覧を取り直せる
+      // モード進入時に事前準備済みなら即開始。準備中なら完了を待つ
+      if (preparing) { statusEl.textContent = '認識モデルを準備中…'; await preparing; }
+      await window.api.rtStart({ vad: rtVadOptions() });
+    } catch (e) {
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      statusEl.textContent = '';
+      startBtn.disabled = false;
+      setModeSwitchEnabled(true);
+      alert(`リアルタイム文字起こしを開始できません: ${e.message}`);
+      return;
+    }
+
+    try {
+      // 16kHz を指定すると Chromium がリサンプルする（FFmpeg 不要）
+      const ctx = new AudioContext({ sampleRate: 16000 });
+      await ctx.audioWorklet.addModule('recorder-worklet.js');
+      const src = ctx.createMediaStreamSource(stream);
+      const node = new AudioWorkletNode(ctx, 'recorder', { numberOfInputs: 1, numberOfOutputs: 0 });
+      cap = { stream, ctx, src, node, samples: 0, peak: 0, timer: 0 };
+      node.port.onmessage = (e) => {
+        if (!cap) return;
+        const chunk = e.data;
+        cap.samples += chunk.length;
+        let peak = 0;
+        for (let i = 0; i < chunk.length; i++) {
+          const v = Math.abs(chunk[i]);
+          if (v > peak) peak = v;
+        }
+        cap.peak = Math.max(peak, cap.peak * 0.7); // 減衰付きピークホールド
+        window.api.rtFeed(chunk);
+      };
+      src.connect(node); // 出力へは繋がない（ハウリング防止）
+    } catch (e) {
+      stream.getTracks().forEach((t) => t.stop());
+      window.api.rtCancel(); // セッションとワーカーを破棄する
+      statusEl.textContent = '';
+      startBtn.disabled = false;
+      setModeSwitchEnabled(true);
+      alert(`マイク音声の取得を開始できません: ${e.message}`);
+      prepareRt(); // 次の録音開始を即時にできるよう作り直しておく
+      return;
+    }
+
+    liveEl.innerHTML = '';
+    liveWrap.classList.remove('hidden');
+    elapsedEl.textContent = '00:00';
+    meterBar.style.width = '0%';
+    cap.timer = setInterval(() => {
+      if (!cap) return;
+      elapsedEl.textContent = fmtTime(cap.samples / 16000);
+      meterBar.style.width = `${Math.min(100, Math.round(cap.peak * 140))}%`;
+    }, 200);
+
+    startBtn.classList.add('hidden');
+    startBtn.disabled = false;
+    stopBtn.classList.remove('hidden');
+    stopBtn.disabled = false;
+    deviceSel.disabled = true;
+    vadSel.disabled = true;
+    statusEl.textContent = '録音中';
+  });
+
+  window.api.onRtSegment((ev) => {
+    if (!cap) return;
+    if (ev.kind === 'seg') {
+      const row = document.createElement('div');
+      row.className = 'seg';
+      const ts = document.createElement('span');
+      ts.className = 'ts';
+      ts.textContent = fmtTime(ev.start);
+      const txt = document.createElement('span');
+      txt.className = 'txt';
+      txt.textContent = ev.text;
+      row.append(ts, txt);
+      liveEl.appendChild(row);
+      liveEl.scrollTop = liveEl.scrollHeight;
+    } else if (ev.kind === 'segError') {
+      statusEl.textContent = `一部の区間の認識に失敗: ${ev.message}`;
+    }
+  });
+
+  stopBtn.addEventListener('click', async () => {
+    if (!cap) return;
+    stopBtn.disabled = true;
+    statusEl.textContent = '仕上げ中…（末尾の認識と録音の保存）';
+    await cleanupCapture();
+    try {
+      const r = await window.api.rtStop();
+      addRealtimeResultJob(r);
+      // ワーカーは main 側で保持されたままなので、次の録音もすぐ開始できる
+      statusEl.textContent = '準備完了';
+      liveWrap.classList.add('hidden');
+    } catch (e) {
+      statusEl.textContent = `停止に失敗: ${e.message}`;
+    }
+    setIdleUi();
+  });
+
+  // 設定変更・ワーカー落ちなどでセッションが main 側から止められた場合
+  window.api.onRtError(async ({ message }) => {
+    await cleanupCapture();
+    statusEl.textContent = `リアルタイム文字起こしが中断されました: ${message}`;
+    setIdleUi();
+  });
+})();
+
+// リアルタイム録音の結果を通常のジョブカードとして表示する。
+// 設定画面（プレビュー・VAD・やり直し）と結果画面のすべてがそのまま使え、
+// 「設定を変えてやり直す」は録音 WAV をバッチパイプラインで再解析する。
+function addRealtimeResultJob(r) {
+  const jobId = addJob(r.wavPath, { name: r.name, deferPreview: true });
+  const job = jobs.get(jobId);
+  job.isRecording = true;
+  job.el.querySelector('.job-setup').classList.add('hidden');
+  onJobDone(jobId, {
+    segments: r.segments,
+    text: r.segments.map((s) => s.text).join('\n'),
+    duration: r.duration,
+    filePath: r.wavPath,
+    name: r.name,
+    jobId,
+  });
 }
 
 // ---- このアプリについて / ライセンス（About モーダル） ----

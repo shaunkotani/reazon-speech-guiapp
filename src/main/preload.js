@@ -51,6 +51,26 @@ contextBridge.exposeInMainWorld('api', {
   preview: (filePath, reqId, denoiseStrength) =>
     ipcRenderer.invoke('preview:generate', filePath, reqId, denoiseStrength),
 
+  // リアルタイム文字起こし（マイク）
+  // モード進入時の事前準備（専用ワーカー起動+モデル読込）。録音開始を即時にする -> { ok }
+  rtPrepare: () => ipcRenderer.invoke('rt:prepare'),
+  // モード離脱時にワーカーを解放する（録音中は no-op） -> { ok }
+  rtRelease: () => ipcRenderer.invoke('rt:release'),
+  // 開始（opts: { vad }）。準備済みワーカーがあれば即開始する -> { ok }
+  rtStart: (opts) => ipcRenderer.invoke('rt:start', opts),
+  // 16kHz mono Float32Array チャンクを送る（高頻度・応答なし）
+  rtFeed: (chunk) => ipcRenderer.send('rt:feed', chunk),
+  // 停止 -> { segments, duration, wavPath, name }（wavPath は一時領域の録音 WAV）
+  rtStop: () => ipcRenderer.invoke('rt:stop'),
+  // 破棄（結果を作らずに中止）
+  rtCancel: () => ipcRenderer.invoke('rt:cancel'),
+  // 確定区間イベント { kind:'seg', start, end, text } / { kind:'segError', message }
+  onRtSegment: (cb) => ipcRenderer.on('rt:segment', (_e, p) => cb(p)),
+  // セッション異常終了（設定変更・ワーカー落ち）
+  onRtError: (cb) => ipcRenderer.on('rt:error', (_e, p) => cb(p)),
+  // 一時領域の録音 WAV を任意の場所へ保存 -> { saved, path }
+  rtSaveWav: (wavPath, suggestedName) => ipcRenderer.invoke('rt:saveWav', wavPath, suggestedName),
+
   // エクスポート
   saveExport: (result, format) => ipcRenderer.invoke('export:save', { result, format }),
 

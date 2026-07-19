@@ -195,6 +195,51 @@ function readPcmRaw(p) {
   return out;
 }
 
+/**
+ * raw float32 PCM ファイルを 16bit PCM WAV へ変換する（リアルタイム録音の保存用）。
+ * 録音は長時間になり得るため、全体をメモリへ載せずチャンク単位で変換する。
+ */
+function convertPcmFileToWav(pcmPath, wavPath) {
+  const n = Math.floor(fs.statSync(pcmPath).size / 4);
+  const dataBytes = n * 2;
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataBytes, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);              // fmt チャンク長
+  header.writeUInt16LE(1, 20);               // PCM
+  header.writeUInt16LE(1, 22);               // mono
+  header.writeUInt32LE(SAMPLE_RATE, 24);
+  header.writeUInt32LE(SAMPLE_RATE * 2, 28); // byte rate
+  header.writeUInt16LE(2, 32);               // block align
+  header.writeUInt16LE(16, 34);              // bits per sample
+  header.write('data', 36);
+  header.writeUInt32LE(dataBytes, 40);
+
+  const inFd = fs.openSync(pcmPath, 'r');
+  const outFd = fs.openSync(wavPath, 'w');
+  try {
+    fs.writeSync(outFd, header);
+    const inBuf = Buffer.alloc(1 << 20);
+    for (;;) {
+      const read = fs.readSync(inFd, inBuf, 0, inBuf.length, null);
+      if (read <= 0) break;
+      const m = Math.floor(read / 4);
+      const outBuf = Buffer.alloc(m * 2);
+      for (let i = 0; i < m; i++) {
+        const v = Math.max(-1, Math.min(1, inBuf.readFloatLE(i * 4)));
+        outBuf.writeInt16LE(Math.round(v * 32767), i * 2);
+      }
+      fs.writeSync(outFd, outBuf);
+    }
+  } finally {
+    fs.closeSync(inFd);
+    fs.closeSync(outFd);
+  }
+  return wavPath;
+}
+
 // ==== 話者分離（VAD 区間ごとの埋め込み + 自前クラスタリング） ====
 // クラスタリング本体は ../shared/cluster.js（純 JS）に分離。
 
@@ -353,6 +398,63 @@ function collectVadSegments(samples, vad) {
 }
 
 /**
+ * リアルタイム用: PCM チャンクを逐次受け取り、確定した発話区間を返す。
+ * collectVadSegments のストリーミング版。同じ front(false)/pop 方式で、
+ * 時刻は feed 開始からの絶対秒。チャンク長は任意（内部で 512 サンプル窓に揃える）。
+ */
+class RealtimeSegmenter {
+  constructor(vad) {
+    this.vad = vad;
+    vad.reset();
+    this.win = new Float32Array(512);
+    this.winFill = 0;
+  }
+
+  _drain(out) {
+    while (!this.vad.isEmpty()) {
+      const seg = this.vad.front(false); // 外部バッファ不可
+      this.vad.pop();
+      out.push({
+        start: seg.start / SAMPLE_RATE,
+        end: (seg.start + seg.samples.length) / SAMPLE_RATE,
+        samples: seg.samples,
+      });
+    }
+  }
+
+  /** @param {Float32Array} chunk @returns 確定した発話区間の配列 */
+  feed(chunk) {
+    const out = [];
+    let i = 0;
+    while (i < chunk.length) {
+      const n = Math.min(512 - this.winFill, chunk.length - i);
+      this.win.set(chunk.subarray(i, i + n), this.winFill);
+      this.winFill += n;
+      i += n;
+      if (this.winFill === 512) {
+        // acceptWaveform は内部バッファへコピーするため win の再利用は安全
+        this.vad.acceptWaveform(this.win);
+        this.winFill = 0;
+        this._drain(out);
+      }
+    }
+    return out;
+  }
+
+  /** 残りを流し切り、末尾の区間を確定させる（録音停止時に一度だけ呼ぶ）。 */
+  flush() {
+    const out = [];
+    if (this.winFill > 0) {
+      this.vad.acceptWaveform(this.win.subarray(0, this.winFill));
+      this.winFill = 0;
+    }
+    this.vad.flush();
+    this._drain(out);
+    return out;
+  }
+}
+
+/**
  * ファイルを VAD で分割しつつ文字起こしする（単一ワーカー版）。
  * 並列版はメインプロセスのワーカープールが担う。話者分離は埋め込み+クラスタリング。
  */
@@ -429,9 +531,11 @@ module.exports = {
   extractEmbedding,
   clusterEmbeddings,
   collectVadSegments,
+  RealtimeSegmenter,
   recognizeSegment,
   writePcmRaw,
   readPcmRaw,
+  convertPcmFileToWav,
   denoisePcm,
   writePcmToWav,
   renderPreviewWav,

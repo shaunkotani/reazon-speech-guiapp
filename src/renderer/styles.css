@@ -417,3 +417,55 @@ button:disabled { background: #9ca3af; cursor: default; }
 
 /* 進捗の推定残り時間（.progress-wrap / .embed-progress は既存の flex 定義を流用） */
 .eta, .embed-eta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* 入力モード選択（ローカルファイル / リアルタイム） */
+.mode-select {
+  display: flex;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--panel);
+}
+.mode-btn {
+  flex: 1;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 14px;
+  padding: 12px;
+  border-radius: 0;
+}
+.mode-btn:hover { background: #f1f5f9; }
+.mode-btn.is-active { background: #eff6ff; color: var(--accent); font-weight: 600; }
+.mode-btn.is-active:hover { background: #eff6ff; }
+.mode-btn:disabled { background: var(--panel); color: #9ca3af; }
+.mode-btn + .mode-btn { border-left: 1px solid var(--border); }
+
+/* リアルタイム文字起こし（マイク） */
+.realtime {
+  background: var(--panel);
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  padding: 24px 16px 14px;
+}
+.rt-center { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.rt-controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.rt-controls select {
+  font-size: 12px; padding: 5px 7px; max-width: 220px;
+  border: 1px solid var(--border); border-radius: 6px; background: #fff;
+}
+.rt-controls select:disabled { opacity: .55; }
+.rt-big { font-size: 16px; padding: 13px 36px; border-radius: 999px; }
+#rt-stop { background: var(--err); }
+#rt-stop:hover { background: #b91c1c; }
+#rt-stop:disabled { background: #9ca3af; }
+.rt-status { font-size: 12px; color: var(--muted); }
+.rt-live-wrap { margin-top: 10px; }
+.rt-monitor { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.rt-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--err); animation: rt-blink 1.2s infinite; }
+@keyframes rt-blink { 50% { opacity: .25; } }
+#rt-elapsed { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rt-meter { flex: 1; max-width: 240px; height: 8px; background: #eef0f3; border-radius: 4px; overflow: hidden; }
+.rt-meter-bar { height: 100%; width: 0%; background: var(--ok); transition: width .15s linear; }
+.rt-live { max-height: 240px; overflow-y: auto; }
+.rt-live:empty::before { content: "（発話が区切れると、ここに認識結果が追記されます）"; color: var(--muted); font-size: 12px; }

@@ -37,12 +37,45 @@
     <div class="progress hidden" id="update-progress"><div class="bar"></div></div>
   </section>
 
-  <!-- ドロップゾーン -->
+  <!-- 入力モード選択（ローカルファイル / リアルタイム） -->
+  <section id="mode-select" class="mode-select">
+    <button id="mode-local" class="mode-btn is-active">📁 ファイルから文字起こし</button>
+    <button id="mode-realtime" class="mode-btn">🎙️ リアルタイム文字起こし（マイク）</button>
+  </section>
+
+  <!-- ドロップゾーン（ローカルファイルモード） -->
   <section id="dropzone" class="dropzone">
     <p>ここに音声/動画ファイルをドラッグ＆ドロップ</p>
     <p class="or">または</p>
     <button id="pick-btn">ファイルを選択</button>
     <p class="hint">対応: wav / mp3 / m4a / flac / mp4 / mov など</p>
+  </section>
+
+  <!-- リアルタイム文字起こし（リアルタイムモード） -->
+  <section id="realtime" class="realtime hidden">
+    <div class="rt-center">
+      <div class="rt-controls">
+        <select id="rt-device" title="使用するマイク">
+          <option value="">既定のマイク</option>
+        </select>
+        <select id="rt-vad" title="話し方（発話の区切り方）"></select>
+      </div>
+      <button id="rt-start" class="rt-big">🎙️ 録音開始</button>
+      <button id="rt-stop" class="rt-big hidden">■ 停止して結果へ</button>
+      <span id="rt-status" class="rt-status"></span>
+    </div>
+    <div id="rt-live-wrap" class="rt-live-wrap hidden">
+      <div class="rt-monitor">
+        <span class="rt-rec-dot"></span>
+        <span id="rt-elapsed">00:00</span>
+        <div class="rt-meter"><div id="rt-meter-bar" class="rt-meter-bar"></div></div>
+      </div>
+      <div id="rt-live" class="rt-live"></div>
+      <p class="hint">
+        マイクの音声をローカルで認識し、発話が区切れるごとに確定文を追記します。
+        ノイズ除去・重なり再解析は録音中は使えません（停止後に「設定を変えてやり直す」で適用できます）。
+      </p>
+    </div>
   </section>
 
   <!-- 認識設定（高精度モード・用語辞書） -->
@@ -203,6 +236,7 @@
           <span class="meta"></span>
           <span class="spacer"></span>
           <button class="redo-btn" title="ノイズ除去や話し方の設定を変えて、同じ音声をもう一度文字起こしします">設定を変えてやり直す</button>
+          <button class="save-audio-btn hidden" title="録音した音声を WAV ファイルとして保存します（アプリ終了時に一時録音は削除されます）">録音を保存</button>
           <button class="tag-btn">話者でタグ付け</button>
           <label class="merge-toggle hidden" title="保存・コピー時に、連続する同じ話者の発言を1つにまとめます">
             <input type="checkbox" class="merge-spk" /> 同じ話者をまとめる

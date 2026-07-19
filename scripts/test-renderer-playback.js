@@ -61,6 +61,23 @@ async function main() {
     }
   }
 
+  // 入力モード切替（既定はローカル。リアルタイムへ切替で録音パネル表示+事前準備）
+  check(await run(`return document.querySelector('#mode-local').classList.contains('is-active')
+    && !document.querySelector('#dropzone').classList.contains('hidden')
+    && document.querySelector('#realtime').classList.contains('hidden');`),
+    '初期状態はローカルモード（ドロップゾーン表示・録音パネル非表示）');
+  await run(`document.querySelector('#mode-realtime').click()`);
+  await waitFor(`document.querySelector('#rt-status').textContent === '準備完了'`,
+    'リアルタイムモードへの切替で事前準備が完了する');
+  check(await run(`return document.querySelector('#dropzone').classList.contains('hidden')
+    && !document.querySelector('#realtime').classList.contains('hidden')
+    && !document.querySelector('#rt-start').disabled;`),
+    'リアルタイムモードで録音パネルが表示され、録音開始が押せる');
+  await run(`document.querySelector('#mode-local').click()`);
+  check(await run(`return !document.querySelector('#dropzone').classList.contains('hidden')
+    && document.querySelector('#realtime').classList.contains('hidden');`),
+    'ローカルモードへ戻るとドロップゾーンが再表示される');
+
   // ファイルを取り込み → 文字起こし実行
   await run(`document.querySelector('#pick-btn').click()`);
   await waitFor(`document.querySelector('.job .start-btn')`, 'ジョブが作られる');
