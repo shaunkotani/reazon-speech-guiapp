@@ -15,6 +15,7 @@ function mediaUrl(absPath) {
 const noop = () => {};
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let transcribeStatusListener = noop;
+let trialStatusListener = noop;
 let transcribeCalls = 0;
 let savedVadPresets = [{
   id: 'short-replies', name: '短い相槌',
@@ -33,6 +34,15 @@ const RESULT = {
   name: path.basename(TARGET),
   jobId: 1,
 };
+const TRIAL_RESULT = {
+  segments: RESULT.segments,
+  text: RESULT.text,
+  duration: RESULT.duration,
+  range: { startSeconds: 0, endSeconds: RESULT.duration, durationSeconds: RESULT.duration, requestedDurationSeconds: 60 },
+  filePath: TARGET,
+  name: path.basename(TARGET),
+  jobId: 1,
+};
 
 contextBridge.exposeInMainWorld('api', {
   modelStatus: async () => ({ ready: true, source: 'test' }),
@@ -40,7 +50,7 @@ contextBridge.exposeInMainWorld('api', {
   onModelProgress: noop,
   getHotwords: async () => ({ text: '', score: 2, enabled: true, highAccuracy: false }),
   setHotwords: async () => ({ ok: true, count: 0 }),
-  setHighAccuracy: async () => ({ ok: true, highAccuracy: false }),
+  setHighAccuracy: async (on) => ({ ok: true, highAccuracy: !!on }),
   getVadPresets: async () => savedVadPresets,
   saveVadPreset: async (value) => {
     const preset = { ...value, id: value.id || `test-${savedVadPresets.length + 1}` };
@@ -98,6 +108,22 @@ contextBridge.exposeInMainWorld('api', {
   cancelTranscribe: async () => true,
   onTranscribeStatus: (cb) => { transcribeStatusListener = cb; },
   onTranscribeProgress: noop,
+  transcribeTrial: async (_filePath, jobId, trialId, opts) => {
+    ipcRenderer.send('trial-opts', opts);
+    trialStatusListener({ jobId, trialId, state: 'queued', phase: 'queued', queuePosition: 1, queueTotal: 1 });
+    await pause(30);
+    trialStatusListener({ jobId, trialId, state: 'running', phase: 'decoding' });
+    await pause(30);
+    trialStatusListener({
+      jobId, trialId, state: 'running', phase: 'recognizing', completed: 1, total: 3,
+      completedWorkSec: 2, totalWorkSec: 14.27, totalAudioSec: RESULT.duration, ratio: 0.14,
+    });
+    await pause(40);
+    trialStatusListener({ jobId, trialId, state: 'completed', phase: 'finalizing', ratio: 1 });
+    return { ...TRIAL_RESULT, jobId };
+  },
+  cancelTranscribeTrial: async () => true,
+  onTranscribeTrialStatus: (cb) => { trialStatusListener = cb; },
   computeEmbeddings: async () => ({ ok: true, count: RESULT.segments.length }),
   onEmbedProgress: noop,
   // 区間クリップ（フォールバック経路）。呼ばれたことを主側へ通知する
@@ -105,6 +131,7 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.send('clip-used');
     return { wavPath: path.join(SAMPLES, 'test.wav') };
   },
+  previewRange: async () => ({ wavPath: path.join(SAMPLES, 'test.wav') }),
   // 本物と同じく中身を丸ごと返す（Blob 化はレンダラ側の責務）
   readMedia: async (filePath) => ({
     data: require('fs').readFileSync(filePath),

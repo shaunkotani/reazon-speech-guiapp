@@ -58,7 +58,7 @@
         <select id="rt-device" title="使用するマイク">
           <option value="">既定のマイク</option>
         </select>
-        <select id="rt-vad" title="話し方（発話の区切り方）"></select>
+        <select id="rt-vad" title="シチュエーション（発話の区切り方）"></select>
       </div>
       <button id="rt-start" class="rt-big">🎙️ 録音開始</button>
       <button id="rt-stop" class="rt-big hidden">■ 停止して結果へ</button>
@@ -73,7 +73,7 @@
       <div id="rt-live" class="rt-live"></div>
       <p class="hint">
         マイクの音声をローカルで認識し、発話が区切れるごとに確定文を追記します。
-        ノイズ除去・重なり再解析は録音中は使えません（停止後に「設定を変えてやり直す」で適用できます）。
+        ノイズの低減・重なり再解析は録音中は使えません（停止後に「設定を変えてやり直す」で適用できます）。
       </p>
     </div>
   </section>
@@ -125,100 +125,234 @@
 
       <!-- 取込後の設定・プレビュー -->
       <div class="job-setup">
-        <div class="preview-row">
-          <span class="plabel">元音声<br><small>先頭10秒</small></span>
+        <div class="audio-panel">
+          <span class="audio-panel-label">音声</span>
           <audio class="audio-original" controls preload="metadata"></audio>
           <span class="orig-status preview-status"></span>
         </div>
-        <div class="denoise-row">
-          <span class="plabel">ノイズ除去</span>
-          <div class="denoise-seg" role="radiogroup" aria-label="ノイズ除去の強さ">
-            <button type="button" class="seg-opt is-active" data-value="0">なし</button>
-            <button type="button" class="seg-opt" data-value="0.5">弱</button>
-            <button type="button" class="seg-opt" data-value="0.8">中</button>
-            <button type="button" class="seg-opt" data-value="1">強</button>
-          </div>
-          <button class="preview-btn" disabled>除去後をプレビュー</button>
-          <span class="preview-status"></span>
-        </div>
-        <div class="preview-row denoised-row hidden">
-          <span class="plabel">除去後<br><small>先頭10秒</small></span>
-          <audio class="audio-denoised" controls preload="metadata"></audio>
-        </div>
 
-        <!-- 発話の区切り方（VAD） -->
-        <div class="vad-row">
-          <span class="plabel">話し方</span>
-          <div class="vad-seg" role="radiogroup" aria-label="音声の話し方">
-            <button type="button" class="seg-opt is-active" data-preset="standard">標準</button>
-            <button type="button" class="seg-opt" data-preset="conversation">会話・電話</button>
-            <button type="button" class="seg-opt" data-preset="interview">インタビュー</button>
-            <button type="button" class="seg-opt" data-preset="lecture">講演・朗読</button>
+        <ol class="setup-flow" aria-label="文字起こしまでの流れ">
+          <li class="is-current" data-setup-step="1"><span class="setup-step-number">1</span><span>音声に合う設定</span></li>
+          <li data-setup-step="2"><span class="setup-step-number">2</span><span>仕上がりをテスト</span></li>
+          <li data-setup-step="3"><span class="setup-step-number">3</span><span>全体を文字起こし</span></li>
+        </ol>
+
+        <section class="scenario-stage" aria-label="音声に合う設定の選択">
+          <div class="setup-stage-head">
+            <span class="stage-number">1</span>
+            <div>
+              <h3>音声に合う設定を選んでください</h3>
+              <p>用途が分かる場合は、シチュエーションから選ぶと精度が上がります</p>
+            </div>
+            <span class="required-badge">必須</span>
           </div>
-          <select class="vad-saved-select" aria-label="保存済みの区切り設定">
-            <option value="" disabled>保存済みプリセット</option>
-          </select>
-          <span class="vad-note vad-preset-note"></span>
-        </div>
+          <div class="setting-choice-layout">
+            <div class="setting-choice-group">
+              <span class="setting-choice-label">シチュエーションから選ぶ</span>
+              <div class="vad-seg scenario-grid" role="radiogroup" aria-label="音声のシチュエーション">
+                <button type="button" class="seg-opt scenario-card" data-scenario="interview" data-preset="interview" role="radio" aria-checked="false">
+                  <strong>インタビュー</strong><small>質問と回答が中心</small>
+                </button>
+                <button type="button" class="seg-opt scenario-card" data-scenario="meeting" data-preset="conversation" role="radio" aria-checked="false">
+                  <strong>会議</strong><small>複数人が交代で話す</small>
+                </button>
+                <button type="button" class="seg-opt scenario-card" data-scenario="phone" data-preset="conversation" role="radio" aria-checked="false">
+                  <strong>電話・通話</strong><small>2人の短い応答が多い</small>
+                </button>
+                <button type="button" class="seg-opt scenario-card" data-scenario="lecture" data-preset="lecture" role="radio" aria-checked="false">
+                  <strong>講演・一人語り</strong><small>一人がまとまって話す</small>
+                </button>
+              </div>
+            </div>
+            <div class="setting-choice-group setting-choice-other">
+              <span class="setting-choice-label">その他</span>
+              <div class="vad-seg other-setting-grid" role="radiogroup" aria-label="その他の認識設定">
+                <button type="button" class="seg-opt scenario-card" data-scenario="normal" data-preset="standard" role="radio" aria-checked="false">
+                  <strong>通常</strong><small>迷ったとき・場面が混ざる音声</small>
+                </button>
+                <button type="button" class="seg-opt scenario-card custom-scenario-card" data-scenario="custom" role="radio" aria-checked="false">
+                  <strong>カスタム</strong><small>保存した設定を使う</small>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="custom-choice-panel hidden">
+            <label>
+              保存した設定
+              <select class="custom-choice-select" aria-label="カスタムで使用する保存済み設定">
+                <option value="">設定を選んでください</option>
+              </select>
+            </label>
+            <p class="custom-choice-empty hidden">保存した設定はまだありません。</p>
+            <button type="button" class="custom-choice-create">詳しい設定から作成する</button>
+          </div>
+          <p class="scenario-required-note">選ぶと、音声に合った認識設定を自動で適用します。</p>
+          <div class="scenario-applied hidden" role="status">
+            <span class="scenario-applied-check">✓</span>
+            <span>「<strong class="scenario-selected-name"></strong>」の設定を適用しました</span>
+            <span class="vad-note vad-preset-note"></span>
+          </div>
+        </section>
+
         <details class="vad-details">
-          <summary>区切りの詳細設定 <span class="vad-custom-badge hidden">カスタム</span></summary>
+          <summary>さらに精度を調整 <small>必要な場合</small><span class="vad-custom-badge hidden">カスタム</span></summary>
           <div class="vad-body">
-            <p class="hint">
-              このアプリは音声を区間に分けてから1区間ずつ認識します。認識モデルは
-              <strong>短い発話向けに作られている</strong>ため、1区間が長すぎると、その区間の文字が
-              まとめて数文字に潰れて消えます。相槌が重なる電話・会議の音声で
-              「ほんの一言しか出てこない」時は、ここを短くしてください。
-            </p>
-            <div class="overlap-ctl">
-              <label class="chk">
-                <input type="checkbox" class="overlap-aware" />
-                重なり音声を再解析
-              </label>
-              <label>
-                想定話者数
-                <select class="overlap-speakers" disabled>
-                  <option value="2" selected>2人</option>
-                  <option value="3">3人</option>
-                  <option value="4">4人</option>
+            <p class="hint">仕上がりをテストして気になる点があった場合に調整してください。</p>
+
+            <section class="advanced-group">
+              <h4>ノイズ</h4>
+              <div class="denoise-row">
+                <span class="plabel">ノイズの低減</span>
+                <div class="denoise-seg" role="radiogroup" aria-label="ノイズの低減の強さ">
+                  <button type="button" class="seg-opt is-active" data-value="0">なし</button>
+                  <button type="button" class="seg-opt" data-value="0.5">弱</button>
+                  <button type="button" class="seg-opt" data-value="0.8">中</button>
+                  <button type="button" class="seg-opt" data-value="1">強</button>
+                </div>
+                <button class="preview-btn" disabled>低減後を試聴</button>
+                <span class="preview-status"></span>
+              </div>
+              <div class="preview-row denoised-row hidden">
+                <span class="plabel">低減後<br><small>先頭10秒</small></span>
+                <audio class="audio-denoised" controls preload="metadata"></audio>
+              </div>
+            </section>
+
+            <section class="advanced-group">
+              <div class="advanced-group-head">
+                <h4>発話の拾い方</h4>
+                <select class="vad-saved-select" aria-label="保存済みの区切り設定">
+                  <option value="" disabled>保存した設定</option>
                 </select>
+              </div>
+              <div class="overlap-ctl">
+                <label class="chk">
+                  <input type="checkbox" class="overlap-aware" />
+                  重なり音声を再解析
+                </label>
+                <label>
+                  想定話者数
+                  <select class="overlap-speakers" disabled>
+                    <option value="2" selected>2人</option>
+                    <option value="3">3人</option>
+                    <option value="4">4人</option>
+                  </select>
+                </label>
+                <span class="vad-ctl-help">同時に話した部分を詳しく解析します。処理時間は長くなります。</span>
+              </div>
+              <label class="vad-ctl">
+                <span class="vad-ctl-name">1区間の最大長 <b class="vad-max-val">6</b> 秒</span>
+                <input type="range" class="vad-max" min="3" max="20" step="1" value="6" />
+                <span class="vad-ctl-help">発言が抜ける場合は短く、文が細かく切れる場合は長くします。</span>
               </label>
-              <span class="vad-ctl-help">話者交代と同時発話を検出し、問題のある区間だけ境界を変えて複数回認識します。処理時間は長くなります。</span>
-            </div>
-            <label class="vad-ctl">
-              <span class="vad-ctl-name">1区間の最大長 <b class="vad-max-val">6</b> 秒</span>
-              <input type="range" class="vad-max" min="3" max="20" step="1" value="6" />
-              <span class="vad-ctl-help">無音が来なくてもこの秒数で強制的に区切ります。<strong>短くすると取りこぼしが減り</strong>、長くすると文が途中で切れにくくなります。会話音声で結果が極端に短い時は、まずこれを下げてください。</span>
-            </label>
-            <label class="vad-ctl">
-              <span class="vad-ctl-name">区切る無音の長さ <b class="vad-sil-val">0.20</b> 秒</span>
-              <input type="range" class="vad-sil" min="0.05" max="1" step="0.05" value="0.2" />
-              <span class="vad-ctl-help">この長さの無音があれば区間を分けます。最短は0.05秒です。<strong>短くすると細かく分かれますが、発話そのものの検出感度は上がりません。</strong>短くしすぎると語の途中で切れることがあります。</span>
-            </label>
-            <label class="vad-ctl">
-              <span class="vad-ctl-name">拾う発話の最小長 <b class="vad-min-speech-val">0.15</b> 秒</span>
-              <input type="range" class="vad-min-speech" min="0.05" max="0.5" step="0.05" value="0.15" />
-              <span class="vad-ctl-help">これより短い音を発話として扱いません。<strong>短くすると「あ」「はい」などの短い相槌を拾いやすくなります</strong>が、物音も拾いやすくなります。</span>
-            </label>
-            <label class="vad-ctl">
-              <span class="vad-ctl-name">発話判定の厳しさ <b class="vad-th-val">0.50</b></span>
-              <input type="range" class="vad-th" min="0.1" max="0.9" step="0.05" value="0.5" />
-              <span class="vad-ctl-help">大きいほど強い音声だけを発話と判定します。小さい声が認識されない時は下げてください（下げすぎるとノイズも拾います）。</span>
-            </label>
-            <div class="vad-preset-save">
-              <input type="text" class="vad-preset-name" maxlength="40" placeholder="カスタムプリセット名" />
-              <button type="button" class="vad-save ghost">現在の設定を保存</button>
-              <button type="button" class="vad-delete ghost" disabled>削除</button>
-              <span class="vad-save-status"></span>
-            </div>
-            <div class="vad-actions">
-              <button type="button" class="vad-reset ghost">プリセットに戻す</button>
-            </div>
+              <label class="vad-ctl">
+                <span class="vad-ctl-name">区切る無音の長さ <b class="vad-sil-val">0.20</b> 秒</span>
+                <input type="range" class="vad-sil" min="0.05" max="1" step="0.05" value="0.2" />
+                <span class="vad-ctl-help">短くすると会話を細かく区切ります。</span>
+              </label>
+              <label class="vad-ctl">
+                <span class="vad-ctl-name">拾う発話の最小長 <b class="vad-min-speech-val">0.15</b> 秒</span>
+                <input type="range" class="vad-min-speech" min="0.05" max="0.5" step="0.05" value="0.15" />
+                <span class="vad-ctl-help">短くすると「あ」「はい」などを拾いやすくなります。</span>
+              </label>
+              <label class="vad-ctl">
+                <span class="vad-ctl-name">発話判定の厳しさ <b class="vad-th-val">0.50</b></span>
+                <input type="range" class="vad-th" min="0.1" max="0.9" step="0.05" value="0.5" />
+                <span class="vad-ctl-help">小さい声が抜ける場合は下げます。</span>
+              </label>
+              <div class="vad-preset-save">
+                <input type="text" class="vad-preset-name" maxlength="40" placeholder="設定名" />
+                <button type="button" class="vad-save ghost">現在の設定を保存</button>
+                <button type="button" class="vad-delete ghost" disabled>削除</button>
+                <span class="vad-save-status"></span>
+              </div>
+              <div class="vad-actions">
+                <button type="button" class="vad-reset ghost">選択時の設定に戻す</button>
+              </div>
+            </section>
           </div>
         </details>
 
         <div class="setup-actions">
-          <button class="start-btn">この設定で文字起こし</button>
-          <button class="back-btn ghost hidden">やめて前の結果に戻る</button>
+          <div class="next-action-copy">
+            <span>次の操作</span>
+            <strong class="next-action-title">音声に合う設定を選んでください</strong>
+            <small class="next-action-note">選択後に、仕上がりを確認できます。</small>
+          </div>
+          <div class="next-action-buttons">
+            <button type="button" class="trial-open-btn" disabled>仕上がりをテスト</button>
+            <button class="start-btn hidden" disabled>テストせず全体を文字起こし</button>
+            <button class="back-btn ghost hidden">やめて前の結果に戻る</button>
+          </div>
+        </div>
+
+        <div class="trial-modal modal hidden" role="dialog" aria-modal="true" aria-label="仕上がりをテスト">
+          <div class="modal-backdrop" data-trial-close></div>
+          <div class="modal-card trial-modal-card">
+            <div class="modal-head">
+              <div>
+                <span class="modal-step-badge">工程 2 / 3</span>
+                <h2>仕上がりをテスト</h2>
+                <p>音声の一部を、全体と同じ設定で文字起こしします。</p>
+              </div>
+              <button type="button" class="modal-close" data-trial-close aria-label="閉じる">×</button>
+            </div>
+            <div class="modal-body">
+              <div class="trial-box">
+                <div class="trial-controls">
+                  <label>
+                    開始位置
+                    <input class="trial-start" type="text" inputmode="numeric" value="00:00" aria-label="試し文字起こしの開始位置" />
+                  </label>
+                  <label>
+                    長さ
+                    <select class="trial-duration" aria-label="試し文字起こしの長さ">
+                      <option value="30">30秒</option>
+                      <option value="60" selected>60秒</option>
+                      <option value="120">120秒</option>
+                    </select>
+                  </label>
+                  <button type="button" class="trial-btn">テストを開始</button>
+                  <span class="trial-range-error" role="alert"></span>
+                </div>
+                <div class="trial-range-preview">
+                  <span class="trial-range-label">テスト範囲の音声</span>
+                  <audio class="trial-range-audio" controls preload="metadata"></audio>
+                  <span class="trial-range-status">音声を準備します</span>
+                </div>
+                <p class="trial-help">会話が始まる位置を指定すると、実際の仕上がりを確認しやすくなります。</p>
+
+                <div class="trial-progress hidden" role="status" aria-live="polite">
+                  <div class="trial-progress-top">
+                    <span class="trial-progress-label">開始を待っています…</span>
+                    <span class="trial-progress-count"></span>
+                  </div>
+                  <div class="progress"><div class="bar is-indeterminate"></div></div>
+                  <div class="trial-progress-foot">
+                    <span class="trial-elapsed">経過 00:00</span>
+                    <button type="button" class="trial-cancel">中止</button>
+                  </div>
+                </div>
+
+                <div class="trial-error hidden" role="alert"></div>
+                <div class="trial-result hidden">
+                  <div class="trial-result-head">
+                    <strong>テスト結果</strong>
+                    <span class="trial-result-meta"></span>
+                    <span class="trial-fresh">この設定で確認済み</span>
+                  </div>
+                  <p class="trial-stale hidden">試行後に設定が変更されています。全体を実行する前に、もう一度試すことをおすすめします。</p>
+                  <p class="trial-settings"></p>
+                  <div class="trial-segments"></div>
+                  <div class="trial-result-actions">
+                    <span>この仕上がりで進みますか？</span>
+                    <button type="button" class="trial-adjust-btn">設定を調整する</button>
+                    <button type="button" class="trial-use-btn">この設定で進む</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -271,7 +405,7 @@
         <div class="toolbar">
           <span class="meta"></span>
           <span class="spacer"></span>
-          <button class="redo-btn" title="ノイズ除去や話し方の設定を変えて、同じ音声をもう一度文字起こしします">設定を変えてやり直す</button>
+          <button class="redo-btn" title="ノイズの低減やシチュエーションの設定を変えて、同じ音声をもう一度文字起こしします">設定を変えてやり直す</button>
           <button class="save-audio-btn hidden" title="録音した音声を WAV ファイルとして保存します（アプリ終了時に一時録音は削除されます）">録音を保存</button>
           <button class="tag-btn">話者でタグ付け</button>
           <label class="merge-toggle hidden" title="保存・コピー時に、連続する同じ話者の発言を1つにまとめます">
@@ -312,6 +446,7 @@
         <div class="about-main">
           <p class="about-app"><strong>モコシ</strong><span id="about-version" class="about-ver"></span></p>
           <p class="about-desc">ReazonSpeech（k2）を sherpa-onnx で動かす、完全ローカル・オフラインの日本語文字起こしアプリ。本体コードは Apache-2.0 で提供されます。</p>
+          <p class="about-repo"><button class="lic-btn about-repo-btn" data-url="https://github.com/shaunkotani/reazon-speech-guiapp">モコシのGitHubリポジトリを開く ↗</button></p>
           <p class="about-privacy">🔒 音声データ・文字起こし結果を外部へ送信しません。通信が発生するのはモデルの初回ダウンロード時のみです。</p>
 
           <h3>オープンソース ライセンス</h3>
@@ -322,7 +457,7 @@
             <li><span class="oss-name">sherpa-onnx</span><span class="oss-lic">Apache-2.0</span><span class="oss-acts"><button class="lic-btn" data-license="apache-2.0">全文</button><button class="lic-btn" data-url="https://github.com/k2-fsa/sherpa-onnx">配布元</button></span></li>
             <li><span class="oss-name">ReazonSpeech k2-v2（認識モデル）</span><span class="oss-lic">Apache-2.0</span><span class="oss-acts"><button class="lic-btn" data-url="https://huggingface.co/reazon-research/reazonspeech-k2-v2">配布元</button></span></li>
             <li><span class="oss-name">Silero VAD（発話検出）</span><span class="oss-lic">MIT</span><span class="oss-acts"><button class="lic-btn" data-license="mit">全文</button></span></li>
-            <li><span class="oss-name">GTCRN（ノイズ除去モデル）</span><span class="oss-lic">上流準拠</span><span class="oss-acts"><button class="lic-btn" data-url="https://github.com/Xiaobin-Rong/gtcrn">配布元</button></span></li>
+            <li><span class="oss-name">GTCRN（ノイズ低減モデル）</span><span class="oss-lic">上流準拠</span><span class="oss-acts"><button class="lic-btn" data-url="https://github.com/Xiaobin-Rong/gtcrn">配布元</button></span></li>
             <li><span class="oss-name">WeSpeaker ResNet34（話者埋め込み）</span><span class="oss-lic">上流準拠</span><span class="oss-acts"><button class="lic-btn" data-url="https://github.com/wenet-e2e/wespeaker">配布元</button></span></li>
           </ul>
           <button class="lic-btn wide" data-license="notice">帰属表示（NOTICE）全文を表示</button>

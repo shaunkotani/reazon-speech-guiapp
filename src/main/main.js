@@ -11,6 +11,7 @@ const exporters = require('../shared/export');
 const { assignByReferences, UNKNOWN_THRESHOLD } = require('../shared/cluster');
 const overlapTools = require('../shared/overlap');
 const transcriptionProgress = require('../shared/transcriptionProgress');
+const rangeTools = require('../shared/transcriptionRange');
 const SerialJobQueue = require('./serialJobQueue');
 const { registerMediaProtocol, MEDIA_MIME } = require('./mediaProtocol');
 
@@ -253,11 +254,18 @@ function showTranscriptionNotification(filePath, result) {
   }
 }
 
+// 試し文字起こしも同じ CPU ワーカープールを使うため同一キューで直列化する。
+// 種別はタスクバー表示だけを分けるために保持する（試行はカード内進捗のみ）。
+const batchRunKinds = new Map();
 const batchQueue = new SerialJobQueue({
   onChange: ({ activeId, size }) => {
     activeBatchJobs = size;
-    if (size === 0) setWindowProgress(-1);
-    else if (activeId == null) setWindowProgress(2, { mode: 'indeterminate' });
+    if (size === 0 || (activeId != null && batchRunKinds.get(activeId) !== 'full')) {
+      setWindowProgress(-1);
+    } else if (activeId == null) {
+      setWindowProgress(2, { mode: 'indeterminate' });
+    }
+    // 全体文字起こしの実行中は、工程イベントが設定した進捗率を維持する。
   },
 });
 
@@ -479,10 +487,11 @@ function checkCancel(jobId) {
   if (cancelled.has(jobId)) { cancelled.delete(jobId); throw new Error('中止しました'); }
 }
 
-function deliverTranscribeStatus(sender, jobId, payload) {
-  const status = { jobId, at: Date.now(), ...payload };
-  if (sender && !sender.isDestroyed()) sender.send('transcribe:status', status);
-  if (batchQueue.activeId === jobId) updateTaskbarProgress(status);
+function deliverTranscribeStatus(sender, jobId, payload, delivery = {}) {
+  const status = { jobId, at: Date.now(), ...(delivery.extra || {}), ...payload };
+  if (sender && !sender.isDestroyed()) sender.send(delivery.channel || 'transcribe:status', status);
+  const queueId = delivery.queueId == null ? jobId : delivery.queueId;
+  if (delivery.taskbar !== false && batchQueue.activeId === queueId) updateTaskbarProgress(status);
 }
 
 ipcMain.handle('transcribe:cancel', (event, jobId) => {
@@ -496,6 +505,28 @@ ipcMain.handle('transcribe:cancel', (event, jobId) => {
   cancelled.add(jobId);
   deliverTranscribeStatus(event.sender, jobId, { state: 'cancelling' });
   // ネイティブ処理は中断できないため、プールを落として確実に止める（次回再生成）
+  destroyPool();
+  return true;
+});
+
+function trialRunKey(jobId, trialId) {
+  return `trial:${String(jobId)}:${String(trialId)}`;
+}
+
+ipcMain.handle('transcribe:trial-cancel', (event, jobId, trialId) => {
+  const runKey = trialRunKey(jobId, trialId);
+  const delivery = {
+    channel: 'transcribe:trial-status', taskbar: false, queueId: runKey, extra: { trialId },
+  };
+  if (batchQueue.hasQueued(runKey)) {
+    const error = transcriptionProgress.describeError(new Error('中止しました'), 'queued', true);
+    deliverTranscribeStatus(event.sender, jobId, { state: 'cancelled', phase: 'queued', error }, delivery);
+    batchQueue.cancelQueued(runKey, new Error('中止しました'));
+    return true;
+  }
+  if (batchQueue.activeId !== runKey) return false;
+  cancelled.add(runKey);
+  deliverTranscribeStatus(event.sender, jobId, { state: 'cancelling' }, delivery);
   destroyPool();
   return true;
 });
@@ -562,18 +593,28 @@ ipcMain.handle('clip:segment', async (event, filePath, start, end) => {
   return rpc(pool[0], 'clip', { filePath, start, end, outPath });
 });
 
-async function performTranscription(sender, filePath, jobId, opts = {}) {
-  const pcmPath = path.join(previewDir, `work-${jobId}-${Date.now()}.pcm`);
+async function performTranscription(sender, filePath, runId, opts = {}, execution = {}) {
+  const publicJobId = execution.jobId == null ? runId : execution.jobId;
+  const safeRunId = String(runId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
+  const pcmPath = path.join(previewDir, `work-${safeRunId}-${Date.now()}.pcm`);
+  const delivery = {
+    channel: execution.statusChannel || 'transcribe:status',
+    taskbar: execution.taskbar !== false,
+    queueId: runId,
+    extra: execution.trialId == null ? {} : { trialId: execution.trialId },
+  };
   let currentPhase = 'preparing';
   const sendStatus = (payload = {}) => {
     if (payload.phase) currentPhase = payload.phase;
-    deliverTranscribeStatus(sender, jobId, {
+    deliverTranscribeStatus(sender, publicJobId, {
       state: 'running', phase: currentPhase, ...payload,
-    });
+    }, delivery);
   };
   // 旧進捗イベントは互換用に残す。新しい画面は transcribe:status を使う。
   const sendProgress = (ratio) => {
-    if (!sender.isDestroyed()) sender.send('transcribe:progress', { jobId, ratio });
+    if (execution.emitLegacyProgress !== false && !sender.isDestroyed()) {
+      sender.send('transcribe:progress', { jobId: publicJobId, ratio });
+    }
   };
 
   try {
@@ -583,13 +624,14 @@ async function performTranscription(sender, filePath, jobId, opts = {}) {
     if (rtSessionActive) {
       throw new Error('リアルタイム文字起こしの実行中は開始できません。先に録音を停止してください。');
     }
-    checkCancel(jobId);
+    checkCancel(runId);
     await ensurePool();
-    checkCancel(jobId);
+    checkCancel(runId);
     fs.mkdirSync(previewDir, { recursive: true });
     // Stage A: 1 ワーカーでデコード+重なり検出+ノイズ除去+VAD → 共有 PCM と区間境界
     sendProgress(0.02);
     const vadOpts = opts.vad || {};
+    const trialRange = opts.range ? rangeTools.normalizeTrialRange(opts.range) : null;
     const overlapOpts = {
       enabled: vadOpts.overlapAware === true,
       numSpeakers: Number.isInteger(vadOpts.overlapSpeakers)
@@ -599,35 +641,54 @@ async function performTranscription(sender, filePath, jobId, opts = {}) {
       filePath, denoiseStrength: opts.denoiseStrength || 0, outPath: pcmPath,
       vad: vadOpts, // 発話検出の設定（未指定なら core の標準値）
       overlap: overlapOpts,
+      range: trialRange,
     }, (ev) => {
       if (ev.kind === 'phase') {
         sendStatus({ phase: ev.phase, totalAudioSec: ev.totalAudioSec || 0 });
       }
     });
-    checkCancel(jobId);
+    checkCancel(runId);
     const maxDuration = (typeof vadOpts.maxSpeechDuration === 'number' && isFinite(vadOpts.maxSpeechDuration))
       ? Math.min(30, Math.max(2, vadOpts.maxSpeechDuration)) : 6;
+    const sourceOffsetSeconds = Number(prep.sourceOffsetSeconds) || 0;
+    const baseSegments = prep.range
+      ? rangeTools.selectSegments(
+        prep.segments,
+        prep.range.selectionStartSeconds,
+        prep.range.selectionEndSeconds,
+      )
+      : prep.segments;
     const recognitionPlan = overlapTools.buildRecognitionItems(
-      prep.segments,
+      baseSegments,
       prep.speakerSegments || [],
       { enabled: overlapOpts.enabled, maxDuration },
     );
     const segs = recognitionPlan.items;
     const total = segs.length;
     const totalWorkSec = segs.reduce((sum, s) => sum + Math.max(0, s.end - s.start), 0);
+    const reportedDuration = prep.range ? prep.range.actualDurationSeconds : prep.duration;
+    const resultRange = prep.range ? {
+      startSeconds: prep.range.startSeconds,
+      endSeconds: prep.range.startSeconds + prep.range.actualDurationSeconds,
+      durationSeconds: prep.range.actualDurationSeconds,
+      requestedDurationSeconds: prep.range.requestedDurationSeconds,
+    } : null;
     if (prep.overlapError) {
       sendStatus({
         state: 'warning', phase: 'overlap',
         warning: '重なり音声の解析を省略し、通常の文字起こしを続けています。',
         warningDetail: prep.overlapError,
-        totalAudioSec: prep.duration,
+        totalAudioSec: reportedDuration,
       });
     }
     if (total === 0) {
-      sendStatus({ phase: 'finalizing', totalAudioSec: prep.duration });
-      sendStatus({ state: 'completed', phase: 'finalizing', ratio: 1, totalAudioSec: prep.duration });
+      sendStatus({ phase: 'finalizing', totalAudioSec: reportedDuration });
+      sendStatus({ state: 'completed', phase: 'finalizing', ratio: 1, totalAudioSec: reportedDuration });
       sendProgress(1);
-      return { segments: [], text: '', duration: prep.duration, filePath, name: path.basename(filePath), jobId };
+      return {
+        segments: [], text: '', duration: reportedDuration, range: resultRange,
+        filePath, name: path.basename(filePath), jobId: publicJobId,
+      };
     }
 
     // Stage B: 区間をプールにラウンドロビン分配し、ASR を並列実行（埋め込みは後付け）
@@ -638,7 +699,7 @@ async function performTranscription(sender, filePath, jobId, opts = {}) {
     const partial = new Array(total);
     sendStatus({
       phase: 'recognizing', completed: 0, total,
-      completedWorkSec: 0, totalWorkSec, totalAudioSec: prep.duration, ratio: 0,
+      completedWorkSec: 0, totalWorkSec, totalAudioSec: reportedDuration, ratio: 0,
     });
     await Promise.all(batches.map((items, w) => {
       if (!items.length) return null;
@@ -650,11 +711,16 @@ async function performTranscription(sender, filePath, jobId, opts = {}) {
           const item = segs[ev.idx];
           if (item) partial[ev.idx] = { ...item, text: ev.text || '' };
           const partialUpdate = item && item.kind === 'base' && String(ev.text || '').trim()
-            ? { index: ev.idx, start: item.start, end: item.end, text: String(ev.text).trim() }
+            ? {
+              index: ev.idx,
+              start: item.start + sourceOffsetSeconds,
+              end: item.end + sourceOffsetSeconds,
+              text: String(ev.text).trim(),
+            }
             : null;
           sendStatus({
             phase: 'recognizing', completed: done, total,
-            completedWorkSec, totalWorkSec, totalAudioSec: prep.duration, ratio,
+            completedWorkSec, totalWorkSec, totalAudioSec: reportedDuration, ratio,
             partial: partialUpdate,
           });
           sendProgress(0.05 + 0.9 * ratio);
@@ -663,41 +729,50 @@ async function performTranscription(sender, filePath, jobId, opts = {}) {
         for (const r of res) partial[r.idx] = { ...segs[r.idx], text: r.text };
       });
     }));
-    checkCancel(jobId);
+    checkCancel(runId);
 
     sendStatus({
       phase: 'finalizing', completed: total, total,
-      completedWorkSec: totalWorkSec, totalWorkSec, totalAudioSec: prep.duration,
+      completedWorkSec: totalWorkSec, totalWorkSec, totalAudioSec: reportedDuration,
     });
     const finalized = overlapTools.finalizeRecognition(partial.filter(Boolean));
-    const ordered = finalized.segments;
+    const selected = prep.range
+      ? rangeTools.selectSegments(
+        finalized.segments,
+        prep.range.selectionStartSeconds,
+        prep.range.selectionEndSeconds,
+      )
+      : finalized.segments;
+    const ordered = rangeTools.offsetSegments(selected, sourceOffsetSeconds);
     sendProgress(1);
-    sendStatus({ state: 'completed', phase: 'finalizing', ratio: 1, totalAudioSec: prep.duration });
+    sendStatus({ state: 'completed', phase: 'finalizing', ratio: 1, totalAudioSec: reportedDuration });
     return {
       segments: ordered,
       text: ordered.map((s) => s.text).join('\n'),
-      duration: prep.duration,
+      duration: reportedDuration,
+      range: resultRange,
       overlap: {
         enabled: overlapOpts.enabled,
         detected: recognitionPlan.overlapIntervals.length,
         recovered: finalized.recoveredGroups,
         error: prep.overlapError || '',
       },
-      filePath, name: path.basename(filePath), jobId,
+      filePath, name: path.basename(filePath), jobId: publicJobId,
     };
   } catch (e) {
-    const wasCancelled = cancelled.has(jobId) || /中止|cancel/i.test(String((e && e.message) || e));
+    const wasCancelled = cancelled.has(runId) || /中止|cancel/i.test(String((e && e.message) || e));
     const error = transcriptionProgress.describeError(e, currentPhase, wasCancelled);
     sendStatus({ state: wasCancelled ? 'cancelled' : 'error', error });
     throw e;
   } finally {
-    cancelled.delete(jobId);
+    cancelled.delete(runId);
     fs.rm(pcmPath, { force: true }, () => {});
   }
 }
 
-ipcMain.handle('transcribe:file', (event, filePath, jobId, opts = {}) =>
-  batchQueue.enqueue({
+ipcMain.handle('transcribe:file', (event, filePath, jobId, opts = {}) => {
+  batchRunKinds.set(jobId, 'full');
+  return batchQueue.enqueue({
     id: jobId,
     onPosition: ({ position, total }) => {
       deliverTranscribeStatus(event.sender, jobId, {
@@ -709,15 +784,47 @@ ipcMain.handle('transcribe:file', (event, filePath, jobId, opts = {}) =>
       showTranscriptionNotification(filePath, result);
       return result;
     },
-  }));
+  }).finally(() => { batchRunKinds.delete(jobId); });
+});
 
-// プレビュー WAV を生成し、再生用のパスを返す（先頭 PREVIEW_SECONDS 秒、必要ならノイズ除去）
-const PREVIEW_SECONDS = 10;
+ipcMain.handle('transcribe:trial', (event, filePath, jobId, trialId, opts = {}) => {
+  const runKey = trialRunKey(jobId, trialId);
+  const delivery = {
+    channel: 'transcribe:trial-status', taskbar: false, queueId: runKey, extra: { trialId },
+  };
+  batchRunKinds.set(runKey, 'trial');
+  const trialOpts = { ...opts, range: rangeTools.normalizeTrialRange(opts.range || {}) };
+  return batchQueue.enqueue({
+    id: runKey,
+    onPosition: ({ position, total }) => {
+      deliverTranscribeStatus(event.sender, jobId, {
+        state: 'queued', phase: 'queued', queuePosition: position, queueTotal: total,
+      }, delivery);
+    },
+    run: () => performTranscription(event.sender, filePath, runKey, trialOpts, {
+      jobId,
+      trialId,
+      statusChannel: 'transcribe:trial-status',
+      taskbar: false,
+      emitLegacyProgress: false,
+    }),
+  }).finally(() => { batchRunKinds.delete(runKey); });
+});
+
+// プレビュー WAV を生成し、再生用のパスを返す。
+// 元音声は全体を確認できるよう無制限、処理負荷の高いノイズ除去後は先頭10秒に留める。
+const DENOISED_PREVIEW_SECONDS = 10;
 ipcMain.handle('preview:generate', async (event, filePath, reqId, denoiseStrength) => {
   await ensurePool();
   fs.mkdirSync(previewDir, { recursive: true });
   const outPath = path.join(previewDir, `preview-${reqId}-${Date.now()}.wav`);
-  return rpc(pool[0], 'preview', { filePath, outPath, denoiseStrength: denoiseStrength || 0, maxSeconds: PREVIEW_SECONDS });
+  const strength = Number(denoiseStrength) || 0;
+  return rpc(pool[0], 'preview', {
+    filePath,
+    outPath,
+    denoiseStrength: strength,
+    maxSeconds: strength > 0 ? DENOISED_PREVIEW_SECONDS : 0,
+  });
 });
 
 // ---- ライセンス / バージョン情報（About 画面） ----

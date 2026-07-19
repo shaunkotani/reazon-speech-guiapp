@@ -8,6 +8,7 @@
 const fs = require('fs');
 const core = require('../core/asr');
 const overlapTools = require('../shared/overlap');
+const rangeTools = require('../shared/transcriptionRange');
 
 let ctx = null;          // recognizer / VAD / denoiser / embedding / lazy diarizer
 let pcmCache = null;     // { path, samples } 直近に読んだ PCM をキャッシュ
@@ -89,10 +90,32 @@ function rtEnqueue(seg) {
 // ---- 各オペレーション ----
 const OPS = {
   // 原音で重なり検出 → ノイズ除去 → 共有 PCM 保存 → VAD/話者区間境界を返す
-  async prepare({ filePath, denoiseStrength, outPath, vad, overlap }, emit) {
+  async prepare({ filePath, denoiseStrength, outPath, vad, overlap, range }, emit) {
     emit({ kind: 'phase', phase: 'decoding' });
-    const rawSamples = await core.decodeToPcm(filePath);
+    const decodeWindow = range ? rangeTools.buildDecodeWindow(range) : null;
+    const rawSamples = await core.decodeToPcm(filePath, decodeWindow ? {
+      startSeconds: decodeWindow.decodeStartSeconds,
+      maxSeconds: decodeWindow.decodeDurationSeconds,
+    } : {});
     const totalAudioSec = rawSamples.length / core.SAMPLE_RATE;
+    let selectedRange = null;
+    if (decodeWindow) {
+      const actualDurationSeconds = Math.max(0, Math.min(
+        decodeWindow.durationSeconds,
+        totalAudioSec - decodeWindow.selectionStartSeconds,
+      ));
+      if (actualDurationSeconds < 0.05) {
+        throw new Error('指定した試行区間に音声がありません。開始位置を音声の長さ以内にしてください。');
+      }
+      selectedRange = {
+        startSeconds: decodeWindow.startSeconds,
+        requestedDurationSeconds: decodeWindow.durationSeconds,
+        actualDurationSeconds,
+        selectionStartSeconds: decodeWindow.selectionStartSeconds,
+        selectionEndSeconds: decodeWindow.selectionStartSeconds + actualDurationSeconds,
+        sourceOffsetSeconds: decodeWindow.decodeStartSeconds,
+      };
+    }
     let speakerSegments = [];
     let overlapError = '';
     if (overlap && overlap.enabled) {
@@ -125,6 +148,8 @@ const OPS = {
       segments: segs.map((s) => ({ start: s.start, end: s.end })),
       speakerSegments,
       overlapError,
+      range: selectedRange,
+      sourceOffsetSeconds: decodeWindow ? decodeWindow.decodeStartSeconds : 0,
     };
   },
 

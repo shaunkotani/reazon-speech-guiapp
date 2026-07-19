@@ -37,18 +37,27 @@ contextBridge.exposeInMainWorld('api', {
   cancelTranscribe: (jobId) => ipcRenderer.invoke('transcribe:cancel', jobId),
   onTranscribeStatus: (cb) => ipcRenderer.on('transcribe:status', (_e, p) => cb(p)),
   onTranscribeProgress: (cb) => ipcRenderer.on('transcribe:progress', (_e, p) => cb(p)),
+  // 設定確認用の短区間文字起こし。本結果とは別に扱い、同じ認識パイプラインを使う。
+  transcribeTrial: (filePath, jobId, trialId, opts) =>
+    ipcRenderer.invoke('transcribe:trial', filePath, jobId, trialId, opts),
+  cancelTranscribeTrial: (jobId, trialId) =>
+    ipcRenderer.invoke('transcribe:trial-cancel', jobId, trialId),
+  onTranscribeTrialStatus: (cb) =>
+    ipcRenderer.on('transcribe:trial-status', (_e, p) => cb(p)),
   // 話者タグ付け用に全区間の声紋を遅延計算 -> { ok, count }
   computeEmbeddings: (jobId, filePath, denoiseStrength, segments) =>
     ipcRenderer.invoke('embeddings:compute', jobId, filePath, denoiseStrength, segments),
   onEmbedProgress: (cb) => ipcRenderer.on('embed:progress', (_e, p) => cb(p)),
   // 区間の音声クリップ生成（試聴） -> { wavPath }
   clipSegment: (filePath, start, end) => ipcRenderer.invoke('clip:segment', filePath, start, end),
+  // 仕上がりテストで指定した範囲の音声クリップ生成 -> { wavPath }
+  previewRange: (filePath, start, end) => ipcRenderer.invoke('clip:segment', filePath, start, end),
   // メディアファイルの中身を丸ごと取得（結果プレイヤーの Blob 化用） -> { data, type }
   readMedia: (filePath) => ipcRenderer.invoke('media:read', filePath),
   // 手本（references: { 話者ID: [区間index,...] }）で再識別 -> { labels, speakerCount }
   reassignSpeakers: (jobId, references) => ipcRenderer.invoke('diarize:reassign', jobId, references),
 
-  // プレビュー WAV 生成（先頭10秒、strength=0 なら原音そのまま） -> { wavPath, duration }
+  // プレビュー WAV 生成（元音声は全体、ノイズ除去後は先頭10秒） -> { wavPath, duration }
   preview: (filePath, reqId, denoiseStrength) =>
     ipcRenderer.invoke('preview:generate', filePath, reqId, denoiseStrength),
 

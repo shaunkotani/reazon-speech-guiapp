@@ -14,6 +14,10 @@ const transcriptionProgress = window.TranscriptionProgress;
 let modelReady = false;
 let jobSeq = 0;
 let previewSeq = 0; // プレビュー生成リクエストの一意ID
+let trialSeq = 0;   // 短区間テストの一意ID
+let savedRecognizerConfig = {
+  highAccuracy: false, hotwordsText: '', hotwordsScore: 2, hotwordsEnabled: true,
+};
 const jobs = new Map(); // jobId -> { el, filePath, result }
 
 function fmtTime(sec) {
@@ -89,6 +93,14 @@ const VAD_PRESETS = {
   },
 };
 
+const SCENARIO_META = {
+  interview: { label: 'インタビュー', summary: '短い回答や小さな声を拾いやすくします' },
+  meeting: { label: '会議', summary: '複数人の交代や声の重なりを詳しく解析します' },
+  phone: { label: '電話・通話', summary: '短い応答と声の重なりを細かく解析します' },
+  lecture: { label: '講演・一人語り', summary: '長めの発話が細かく切れすぎないようにします' },
+  normal: { label: '通常', summary: '音声の種類を問わずバランスよく認識します' },
+};
+
 // 保存済みプリセットは settings.json に置き、追加済みの全ジョブへ即時反映する。
 let customVadPresets = [];
 const vadPresetViews = new Set();
@@ -131,7 +143,11 @@ function syncAccuracyUI() {
 
 accToggle.addEventListener('change', async () => {
   userHighAccuracy = accToggle.checked;
-  try { await window.api.setHighAccuracy(userHighAccuracy); }
+  try {
+    const result = await window.api.setHighAccuracy(userHighAccuracy);
+    savedRecognizerConfig.highAccuracy = result.highAccuracy === true;
+    markAllTrialResultsForSettingsChange();
+  }
   catch (e) { alert(`高精度モードの保存に失敗: ${e.message}`); }
 });
 
@@ -150,6 +166,13 @@ hwSave.addEventListener('click', async () => {
     });
     hwStatus.textContent = `保存しました（${res.count}語）`;
     savedDictActive = hwEnabled.checked && res.count > 0;
+    savedRecognizerConfig = {
+      ...savedRecognizerConfig,
+      hotwordsText: hwText.value.split('\n').map((line) => line.trim()).filter(Boolean).join('\n'),
+      hotwordsScore: Number(hwScore.value),
+      hotwordsEnabled: hwEnabled.checked,
+    };
+    markAllTrialResultsForSettingsChange();
     syncAccuracyUI();
     updateHotwordsSummary();
     setTimeout(() => { hwStatus.textContent = ''; }, 2500);
@@ -169,6 +192,12 @@ hwSave.addEventListener('click', async () => {
     hwScoreVal.textContent = Number(hw.score).toFixed(1);
     userHighAccuracy = hw.highAccuracy === true;
     savedDictActive = hwEnabled.checked && hotwordsCount(hwText.value) > 0;
+    savedRecognizerConfig = {
+      highAccuracy: userHighAccuracy,
+      hotwordsText: hwText.value.split('\n').map((line) => line.trim()).filter(Boolean).join('\n'),
+      hotwordsScore: Number(hwScore.value),
+      hotwordsEnabled: hwEnabled.checked,
+    };
     syncAccuracyUI();
     updateHotwordsSummary();
   } catch (_) { /* 起動直後は無視 */ }
@@ -221,6 +250,282 @@ function clearAudioObjectUrl(audio, job, key) {
   }
 }
 
+function parseTrialStart(value) {
+  const text = String(value || '').trim();
+  if (!/^\d+(?::\d{1,2}){0,2}$/.test(text)) return null;
+  const parts = text.split(':').map(Number);
+  if (parts.some((part) => !Number.isFinite(part))) return null;
+  if (parts.length >= 2 && parts[parts.length - 1] >= 60) return null;
+  if (parts.length === 3 && parts[1] >= 60) return null;
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return parts[0] * 3600 + parts[1] * 60 + parts[2];
+}
+
+function formatTrialStart(seconds) {
+  const value = Math.max(0, Math.floor(Number(seconds) || 0));
+  const h = Math.floor(value / 3600);
+  const m = Math.floor((value % 3600) / 60);
+  const s = value % 60;
+  return h > 0
+    ? `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+    : `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function trialSettingsFingerprint(opts) {
+  const vad = opts && opts.vad ? opts.vad : {};
+  return JSON.stringify({
+    recognizer: savedRecognizerConfig,
+    denoiseStrength: Number(opts && opts.denoiseStrength) || 0,
+    vad: {
+      scenario: String(vad.scenario || ''),
+      maxSpeechDuration: Number(vad.maxSpeechDuration),
+      minSilenceDuration: Number(vad.minSilenceDuration),
+      minSpeechDuration: Number(vad.minSpeechDuration),
+      threshold: Number(vad.threshold),
+      overlapAware: vad.overlapAware === true,
+      overlapSpeakers: Number(vad.overlapSpeakers),
+    },
+  });
+}
+
+function trialSettingsSummary(opts) {
+  const denoise = { 0: 'なし', 0.5: '弱', 0.8: '中', 1: '強' }[Number(opts.denoiseStrength) || 0] || String(opts.denoiseStrength);
+  const presetNames = { standard: '標準', conversation: '会話・電話', interview: 'インタビュー', lecture: '講演・朗読', custom: 'カスタム' };
+  const vad = opts.vad || {};
+  const scenario = vad.scenario === 'custom'
+    ? `カスタム（${vad.scenarioName || '保存した設定'}）`
+    : (SCENARIO_META[vad.scenario]
+      ? SCENARIO_META[vad.scenario].label
+      : (vad.scenarioName || presetNames[vad.preset] || vad.preset || '未選択'));
+  const recognizer = [
+    ...(savedRecognizerConfig.highAccuracy ? ['高精度'] : []),
+    ...(savedDictActive ? ['用語辞書'] : []),
+  ];
+  return [
+    `ノイズの低減 ${denoise}`,
+    `シチュエーション ${scenario}`,
+    `最大${Number(vad.maxSpeechDuration) || 6}秒`,
+    vad.overlapAware ? `重なり再解析 ${Number(vad.overlapSpeakers) || 2}人` : '重なり再解析なし',
+    recognizer.length ? recognizer.join('・') : '通常認識',
+  ].join(' ・ ');
+}
+
+function refreshTrialFreshness(jobId) {
+  const job = jobs.get(jobId);
+  if (!job) return;
+  if (!job.lastTrial || typeof job._getTranscribeOpts !== 'function') {
+    job.trialIsFresh = false;
+    if (typeof job._refreshSetupFlow === 'function') job._refreshSetupFlow();
+    return;
+  }
+  const stale = job.lastTrial.fingerprint !== trialSettingsFingerprint(job._getTranscribeOpts());
+  const el = job.el;
+  el.querySelector('.trial-stale').classList.toggle('hidden', !stale);
+  el.querySelector('.trial-fresh').classList.toggle('hidden', stale);
+  const useButton = el.querySelector('.trial-use-btn');
+  if (useButton) {
+    useButton.disabled = stale;
+    useButton.title = stale ? '設定が変わったため、もう一度テストしてください' : '';
+  }
+  job.trialIsFresh = !stale;
+  if (typeof job._refreshSetupFlow === 'function') job._refreshSetupFlow();
+}
+
+function markAllTrialResultsForSettingsChange() {
+  for (const jobId of jobs.keys()) refreshTrialFreshness(jobId);
+}
+
+function applyTrialStatus(status) {
+  const job = jobs.get(status.jobId);
+  if (!job || String(job.activeTrialId) !== String(status.trialId)) return;
+  const el = job.el;
+  const progress = el.querySelector('.trial-progress');
+  const label = progress.querySelector('.trial-progress-label');
+  const count = progress.querySelector('.trial-progress-count');
+  const bar = progress.querySelector('.bar');
+  if (status.error) job.trialErrorInfo = status.error;
+  if (status.warning) job.trialWarning = status.warning;
+  if (status.state === 'cancelling') {
+    label.textContent = '中止しています…';
+    progress.querySelector('.trial-cancel').disabled = true;
+    return;
+  }
+  if (['completed', 'cancelled', 'error'].includes(status.state)) return;
+  if (status.state === 'queued') {
+    label.textContent = `開始待ち（${status.queuePosition || 1}番目 / 全${status.queueTotal || 1}件）`;
+    count.textContent = '';
+  } else {
+    label.textContent = transcriptionProgress.phaseMeta(status.phase).active;
+    if (status.phase === 'recognizing' && Number(status.total) > 0) {
+      count.textContent = `${Number(status.completed) || 0} / ${status.total}区間`;
+    } else count.textContent = '';
+  }
+  const ratio = Number(status.ratio);
+  if (status.phase === 'recognizing' && Number.isFinite(ratio)) {
+    bar.classList.remove('is-indeterminate');
+    bar.style.width = `${Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%`;
+  } else {
+    bar.classList.add('is-indeterminate');
+    bar.style.width = '';
+  }
+}
+
+let trialSharedAudio = null;
+let trialSharedStop = null;
+async function playTrialSegment(job, segment, button) {
+  if (trialSharedStop) trialSharedStop();
+  if (!trialSharedAudio) trialSharedAudio = new Audio();
+  let stopped = false;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    trialSharedAudio.pause();
+    button.textContent = '▶';
+    button.classList.remove('is-playing');
+    if (trialSharedStop === stop) trialSharedStop = null;
+  };
+  trialSharedStop = stop;
+  try {
+    if (!segment._trialClip) {
+      button.textContent = '…';
+      const clip = await window.api.clipSegment(job.filePath, segment.start, segment.end);
+      segment._trialClip = window.api.mediaUrl(clip.wavPath);
+    }
+    trialSharedAudio.src = segment._trialClip;
+    button.textContent = '■';
+    button.classList.add('is-playing');
+    trialSharedAudio.addEventListener('ended', stop, { once: true });
+    await trialSharedAudio.play();
+  } catch (e) {
+    stop();
+    console.error('trial clip play failed', e);
+  }
+}
+
+function renderTrialResult(jobId, result, attempt) {
+  const job = jobs.get(jobId);
+  if (!job) return;
+  job.lastTrial = { result, ...attempt };
+  const el = job.el;
+  const box = el.querySelector('.trial-result');
+  const range = result.range || attempt.range;
+  const end = range.endSeconds == null ? range.startSeconds + range.durationSeconds : range.endSeconds;
+  box.querySelector('.trial-result-meta').textContent =
+    `${formatTrialStart(range.startSeconds)}〜${formatTrialStart(end)} ・ ${result.segments.length}区間 ・ ${transcriptionProgress.formatElapsed(attempt.elapsedSeconds)}`;
+  box.querySelector('.trial-settings').textContent = `使用設定: ${attempt.summary}${job.trialWarning ? ` ・ ${job.trialWarning}` : ''}`;
+  const segments = box.querySelector('.trial-segments');
+  segments.replaceChildren();
+  if (!result.segments.length) {
+    const empty = document.createElement('div');
+    empty.className = 'trial-seg-empty';
+    empty.textContent = '（この区間では発話を検出できませんでした）';
+    segments.appendChild(empty);
+  } else {
+    result.segments.forEach((segment) => {
+      const row = document.createElement('div');
+      row.className = 'trial-seg';
+      const play = document.createElement('button');
+      play.className = 'seg-play';
+      play.textContent = '▶';
+      play.title = '音声でこの区間を確認';
+      play.addEventListener('click', () => {
+        if (play.classList.contains('is-playing')) { if (trialSharedStop) trialSharedStop(); }
+        else playTrialSegment(job, segment, play);
+      });
+      const time = document.createElement('span');
+      time.className = 'ts';
+      time.textContent = formatTrialStart(segment.start);
+      const text = document.createElement('span');
+      text.className = 'txt';
+      text.textContent = segment.text;
+      row.append(play, time, text);
+      segments.appendChild(row);
+    });
+  }
+  box.classList.remove('hidden');
+  refreshTrialFreshness(jobId);
+}
+
+async function startTranscriptionTrial(jobId) {
+  const job = jobs.get(jobId);
+  if (!job || job.activeTrialId || typeof job._getTranscribeOpts !== 'function'
+    || (typeof job._hasScenario === 'function' && !job._hasScenario())) return;
+  const el = job.el;
+  const startInput = el.querySelector('.trial-start');
+  const durationInput = el.querySelector('.trial-duration');
+  const rangeError = el.querySelector('.trial-range-error');
+  const startSeconds = parseTrialStart(startInput.value);
+  if (startSeconds == null) {
+    rangeError.textContent = '開始位置は 05:30 または 01:05:30 の形式で入力してください';
+    startInput.focus();
+    return;
+  }
+  startInput.value = formatTrialStart(startSeconds);
+  rangeError.textContent = '';
+  const durationSeconds = Number(durationInput.value) || 60;
+  const range = { startSeconds, durationSeconds };
+  const opts = job._getTranscribeOpts();
+  const attempt = {
+    range,
+    fingerprint: trialSettingsFingerprint(opts),
+    summary: trialSettingsSummary(opts),
+    startedAt: Date.now(),
+  };
+  const trialId = ++trialSeq;
+  job.activeTrialId = trialId;
+  if (typeof job._refreshSetupFlow === 'function') job._refreshSetupFlow();
+  job.trialErrorInfo = null;
+  job.trialWarning = '';
+  el.querySelector('.trial-error').classList.add('hidden');
+  el.querySelector('.trial-progress').classList.remove('hidden');
+  el.querySelector('.trial-progress .bar').classList.add('is-indeterminate');
+  el.querySelector('.trial-progress .bar').style.width = '';
+  el.querySelector('.trial-progress-label').textContent = '開始を待っています…';
+  el.querySelector('.trial-progress-count').textContent = '';
+  el.querySelector('.trial-cancel').disabled = false;
+  el.querySelector('.trial-btn').disabled = true;
+  el.querySelector('.start-btn').disabled = true;
+  startInput.disabled = true;
+  durationInput.disabled = true;
+  el.querySelector('.job-status').textContent = '仕上がりをテスト中';
+  job.trialTimer = setInterval(() => {
+    el.querySelector('.trial-elapsed').textContent =
+      `経過 ${transcriptionProgress.formatElapsed((Date.now() - attempt.startedAt) / 1000)}`;
+  }, 1000);
+
+  try {
+    const result = await window.api.transcribeTrial(job.filePath, jobId, trialId, { ...opts, range });
+    attempt.elapsedSeconds = (Date.now() - attempt.startedAt) / 1000;
+    renderTrialResult(jobId, result, attempt);
+    el.querySelector('.job-status').textContent = job.result ? '設定を変更中' : 'テスト完了';
+  } catch (error) {
+    const info = job.trialErrorInfo || transcriptionProgress.describeError(error, null, /中止/.test(String(error.message || error)));
+    const cancelled = info.cancelled || info.code === 'CANCELLED';
+    if (!cancelled) {
+      const errorBox = el.querySelector('.trial-error');
+      const raw = String(error.message || error);
+      errorBox.textContent = raw.includes('指定した試行区間') ? raw : `${info.title}: ${info.message}`;
+      errorBox.classList.remove('hidden');
+    }
+    el.querySelector('.job-status').textContent = job.result ? '設定を変更中' : (cancelled ? '試行を中止' : '準備完了');
+  } finally {
+    if (job.trialTimer) clearInterval(job.trialTimer);
+    job.trialTimer = null;
+    if (String(job.activeTrialId) === String(trialId)) job.activeTrialId = null;
+    el.querySelector('.trial-progress').classList.add('hidden');
+    el.querySelector('.trial-btn').disabled = false;
+    el.querySelector('.start-btn').disabled = false;
+    startInput.disabled = false;
+    durationInput.disabled = false;
+    refreshTrialFreshness(jobId);
+  }
+}
+
+if (typeof window.api.onTranscribeTrialStatus === 'function') {
+  window.api.onTranscribeTrialStatus(applyTrialStatus);
+}
+
 function addJob(filePath, { name = '', deferPreview = false } = {}) {
   const jobId = ++jobSeq;
   const node = jobTpl.content.cloneNode(true);
@@ -239,7 +544,7 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
   const denoisedRow = el.querySelector('.denoised-row');
   const audioDenoised = el.querySelector('.audio-denoised');
 
-  // 元音声プレビュー（先頭10秒のクリップを生成して再生）。
+  // 元音声プレビュー（音声全体を WAV に変換して再生）。
   // リアルタイム録音の結果ジョブは設定画面を開くまで不要なうえ、生成が
   // ワーカープールを起動してしまうため、deferPreview で遅延させる。
   const ensureOriginalPreview = async () => {
@@ -270,12 +575,13 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
     denoisedRow.classList.add('hidden');
     previewStatus.textContent = '';
     previewBtn.disabled = denoiseStrength <= 0;
+    refreshTrialFreshness(jobId);
   }
   segOpts.forEach((b) => b.addEventListener('click', () => setDenoise(parseFloat(b.dataset.value))));
 
   // 除去後プレビュー生成（先頭10秒）
   previewBtn.addEventListener('click', async () => {
-    if (denoiseStrength <= 0) { alert('「ノイズ除去」を弱/中/強のいずれかにしてください。'); return; }
+    if (denoiseStrength <= 0) { alert('「ノイズの低減」を弱/中/強のいずれかにしてください。'); return; }
     const myReq = ++previewReq;
     previewBtn.disabled = true;
     previewStatus.textContent = '生成中…';
@@ -297,7 +603,13 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
   // ---- 発話の区切り方（VAD）----
   // 認識モデルは短い発話向けなので、1区間が長すぎると中身が数文字に潰れる。
   // 音声の性質（会話か独話か）で最適値が変わるためジョブ単位で選べるようにする。
-  const vadSeg = Array.from(el.querySelectorAll('.vad-seg .seg-opt'));
+  const vadSeg = Array.from(el.querySelectorAll('.setting-choice-layout .scenario-card'));
+  const builtInScenarioButtons = vadSeg.filter((button) => !!button.dataset.preset);
+  const customScenarioBtn = el.querySelector('.custom-scenario-card');
+  const customChoicePanel = el.querySelector('.custom-choice-panel');
+  const customChoiceSelect = el.querySelector('.custom-choice-select');
+  const customChoiceEmpty = el.querySelector('.custom-choice-empty');
+  const customChoiceCreate = el.querySelector('.custom-choice-create');
   const vadMax = el.querySelector('.vad-max');
   const vadSil = el.querySelector('.vad-sil');
   const vadMinSpeech = el.querySelector('.vad-min-speech');
@@ -312,7 +624,33 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
   const deletePresetBtn = el.querySelector('.vad-delete');
   const savePresetStatus = el.querySelector('.vad-save-status');
 
-  let presetSource = { kind: 'builtin', id: 'standard' };
+  // 数値の初期値には standard を使うが、シチュエーションはユーザーが必ず選ぶ。
+  let selectedScenario = '';
+  let selectedScenarioName = '';
+  let selectedCustomPresetId = '';
+  let presetSource = { kind: 'builtin', id: 'standard', scenario: '' };
+
+  const hasCompleteSettingChoice = () => !!selectedScenario
+    && (selectedScenario !== 'custom' || !!selectedCustomPresetId);
+
+  function syncScenarioUi() {
+    vadSeg.forEach((button) => {
+      const selected = !!selectedScenario && button.dataset.scenario === selectedScenario;
+      button.classList.toggle('is-active', selected);
+      button.setAttribute('aria-checked', selected ? 'true' : 'false');
+    });
+    const complete = hasCompleteSettingChoice();
+    customChoicePanel.classList.toggle('hidden', selectedScenario !== 'custom');
+    const requiredNote = el.querySelector('.scenario-required-note');
+    requiredNote.classList.toggle('hidden', complete);
+    requiredNote.textContent = selectedScenario === 'custom'
+      ? '保存した設定を選ぶと、次の工程へ進めます。'
+      : '選ぶと、音声に合った認識設定を自動で適用します。';
+    el.querySelector('.scenario-applied').classList.toggle('hidden', !complete);
+    el.querySelector('.scenario-selected-name').textContent = selectedScenarioName;
+    if (selectedScenario === 'custom') customChoiceSelect.value = selectedCustomPresetId;
+    if (typeof job._refreshSetupFlow === 'function') job._refreshSetupFlow();
+  }
 
   function applyPresetValues(p) {
     vadMax.value = p.maxSpeechDuration;
@@ -324,32 +662,59 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
     syncVadLabels();
     syncOverlapUi();
     vadBadge.classList.add('hidden');
+    refreshTrialFreshness(jobId);
   }
 
-  function applyBuiltInPreset(name) {
+  function applyBuiltInPreset(name, scenario = name) {
     const p = VAD_PRESETS[name];
     if (!p) return;
-    presetSource = { kind: 'builtin', id: name };
+    selectedScenario = scenario;
+    selectedScenarioName = SCENARIO_META[scenario] ? SCENARIO_META[scenario].label : '';
+    selectedCustomPresetId = '';
+    presetSource = { kind: 'builtin', id: name, scenario };
     applyPresetValues(p);
-    vadSeg.forEach((b) => b.classList.toggle('is-active', b.dataset.preset === name));
+    syncScenarioUi();
     savedSelect.value = '';
     presetName.value = '';
     deletePresetBtn.disabled = true;
-    vadPresetNote.textContent = p.note;
+    vadPresetNote.textContent = SCENARIO_META[scenario] ? SCENARIO_META[scenario].summary : '';
     savePresetStatus.textContent = '';
   }
 
-  function applySavedPreset(id) {
+  function applySavedPreset(id, asCustomScenario = selectedScenario === 'custom') {
     const p = customVadPresets.find((item) => item.id === id);
     if (!p) return;
-    presetSource = { kind: 'custom', id: p.id };
+    if (asCustomScenario) {
+      selectedScenario = 'custom';
+      selectedScenarioName = p.name;
+      selectedCustomPresetId = p.id;
+    }
+    presetSource = { kind: 'custom', id: p.id, scenario: selectedScenario };
     applyPresetValues(p);
-    vadSeg.forEach((b) => b.classList.remove('is-active'));
+    syncScenarioUi();
     savedSelect.value = p.id;
+    customChoiceSelect.value = asCustomScenario ? p.id : '';
     presetName.value = p.name;
     deletePresetBtn.disabled = false;
-    vadPresetNote.textContent = `保存した設定「${p.name}」`;
+    vadPresetNote.textContent = '保存した詳細設定を適用しています';
     savePresetStatus.textContent = '';
+  }
+
+  function chooseCustomScenario(forceReset = false) {
+    if (!forceReset && selectedScenario === 'custom' && selectedCustomPresetId) {
+      syncScenarioUi();
+      return;
+    }
+    selectedScenario = 'custom';
+    selectedScenarioName = '';
+    selectedCustomPresetId = '';
+    presetSource = { kind: 'builtin', id: 'standard', scenario: 'custom' };
+    applyPresetValues(VAD_PRESETS.standard);
+    savedSelect.value = '';
+    presetName.value = '';
+    deletePresetBtn.disabled = true;
+    vadPresetNote.textContent = '';
+    syncScenarioUi();
   }
 
   function syncVadLabels() {
@@ -376,23 +741,53 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
       && overlapAware.checked === p.overlapAware
       && Number(overlapSpeakers.value) === p.overlapSpeakers;
     vadBadge.classList.toggle('hidden', same);
+    refreshTrialFreshness(jobId);
   }
 
   function renderSavedPresets() {
     const selected = presetSource.kind === 'custom' ? presetSource.id : '';
-    const placeholder = new Option('保存済みプリセット', '');
+    const placeholder = new Option('保存した設定', '');
     placeholder.disabled = true;
     savedSelect.replaceChildren(placeholder);
     customVadPresets.forEach((p) => savedSelect.add(new Option(p.name, p.id)));
-    savedSelect.disabled = customVadPresets.length === 0;
-    savedSelect.value = customVadPresets.some((p) => p.id === selected) ? selected : '';
+    const hasSavedPresets = customVadPresets.length > 0;
+    const selectedStillExists = customVadPresets.some((p) => p.id === selected);
+    savedSelect.disabled = !hasSavedPresets;
+    savedSelect.value = selectedStillExists ? selected : '';
+
+    customChoiceSelect.replaceChildren(new Option('設定を選んでください', ''));
+    customVadPresets.forEach((p) => customChoiceSelect.add(new Option(p.name, p.id)));
+    customChoiceSelect.classList.toggle('hidden', !hasSavedPresets);
+    customChoiceSelect.disabled = !hasSavedPresets;
+    customChoiceEmpty.classList.toggle('hidden', hasSavedPresets);
+
+    if (selectedCustomPresetId && !customVadPresets.some((p) => p.id === selectedCustomPresetId)) {
+      selectedCustomPresetId = '';
+      selectedScenarioName = '';
+      if (selectedScenario === 'custom') syncScenarioUi();
+    }
+    customChoiceSelect.value = selectedCustomPresetId;
   }
 
   const presetView = { render: renderSavedPresets };
   vadPresetViews.add(presetView);
   vadPresetsReady.then(renderSavedPresets);
 
-  vadSeg.forEach((b) => b.addEventListener('click', () => applyBuiltInPreset(b.dataset.preset)));
+  builtInScenarioButtons.forEach((b) => b.addEventListener('click', () => {
+    applyBuiltInPreset(b.dataset.preset, b.dataset.scenario);
+  }));
+  customScenarioBtn.addEventListener('click', () => chooseCustomScenario());
+  customChoiceSelect.addEventListener('change', () => {
+    if (customChoiceSelect.value) applySavedPreset(customChoiceSelect.value, true);
+  });
+  customChoiceCreate.addEventListener('click', () => {
+    const details = el.querySelector('.vad-details');
+    details.open = true;
+    requestAnimationFrame(() => {
+      details.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      presetName.focus();
+    });
+  });
   savedSelect.addEventListener('change', () => {
     if (savedSelect.value) applySavedPreset(savedSelect.value);
   });
@@ -401,7 +796,7 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
   overlapSpeakers.addEventListener('change', markCustom);
   el.querySelector('.vad-reset').addEventListener('click', () => {
     if (presetSource.kind === 'custom') applySavedPreset(presetSource.id);
-    else applyBuiltInPreset(presetSource.id);
+    else applyBuiltInPreset(presetSource.id, presetSource.scenario);
   });
 
   savePresetBtn.addEventListener('click', async () => {
@@ -438,17 +833,29 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
     try {
       const res = await window.api.deleteVadPreset(p.id);
       setCustomVadPresets(res.presets);
-      applyBuiltInPreset('standard');
+      if (selectedScenario === 'custom') {
+        chooseCustomScenario(true);
+        savePresetStatus.textContent = '削除しました。別の保存済み設定を選んでください';
+        return;
+      }
+      const presetForScenario = {
+        interview: 'interview', meeting: 'conversation', phone: 'conversation', lecture: 'lecture',
+        normal: 'standard',
+      }[selectedScenario];
+      applyBuiltInPreset(presetForScenario || 'standard', selectedScenario);
     } catch (e) {
       savePresetStatus.textContent = `削除失敗: ${e.message}`;
       deletePresetBtn.disabled = false;
     }
   });
 
-  applyBuiltInPreset('standard');
+  // シチュエーション選択前も詳細設定の数値は安全な標準値で初期化しておく。
+  applyBuiltInPreset('standard', '');
 
   const vadOptions = () => ({
     preset: presetSource.kind === 'builtin' ? presetSource.id : 'custom',
+    scenario: selectedScenario,
+    scenarioName: selectedScenarioName,
     maxSpeechDuration: Number(vadMax.value),
     minSilenceDuration: Number(vadSil.value),
     minSpeechDuration: Number(vadMinSpeech.value),
@@ -456,10 +863,148 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
     overlapAware: overlapAware.checked,
     overlapSpeakers: Number(overlapSpeakers.value),
   });
+  job._getTranscribeOpts = () => ({ denoiseStrength, vad: vadOptions() });
+  job._hasScenario = hasCompleteSettingChoice;
+
+  // 短区間の確認は設定カード内に常設せず、必要な時だけ独立したモーダルで開く。
+  const trialModal = el.querySelector('.trial-modal');
+  const trialOpenBtn = el.querySelector('.trial-open-btn');
+  const startBtn = el.querySelector('.start-btn');
+  const setupActions = el.querySelector('.setup-actions');
+  const trialRangeAudio = el.querySelector('.trial-range-audio');
+  const trialRangeStatus = el.querySelector('.trial-range-status');
+  const trialStartInput = el.querySelector('.trial-start');
+  const trialDurationInput = el.querySelector('.trial-duration');
+  const trialRunBtn = el.querySelector('.trial-btn');
+  let trialRangePreviewReq = 0;
+  let trialRangePreviewKey = '';
+
+  function refreshSetupFlow() {
+    const hasScenario = hasCompleteSettingChoice();
+    const trialFresh = !!job.lastTrial && job.trialIsFresh === true;
+    const trialActive = !!job.activeTrialId;
+    const currentStep = !hasScenario ? 1 : (trialFresh ? 3 : 2);
+    el.querySelectorAll('[data-setup-step]').forEach((step) => {
+      const number = Number(step.dataset.setupStep);
+      step.classList.toggle('is-complete', number < currentStep);
+      step.classList.toggle('is-current', number === currentStep);
+    });
+
+    trialOpenBtn.disabled = !hasScenario || trialActive;
+    startBtn.disabled = !hasScenario || trialActive;
+    startBtn.classList.toggle('hidden', !hasScenario);
+    startBtn.classList.toggle('is-trial-verified', trialFresh);
+    setupActions.classList.toggle('is-scenario-required', !hasScenario);
+    setupActions.classList.toggle('is-test-next', hasScenario && !trialFresh);
+    setupActions.classList.toggle('is-transcribe-next', trialFresh);
+
+    const title = el.querySelector('.next-action-title');
+    const note = el.querySelector('.next-action-note');
+    if (!hasScenario) {
+      title.textContent = selectedScenario === 'custom'
+        ? '保存した設定を選んでください'
+        : '音声に合う設定を選んでください';
+      note.textContent = '選択後に、仕上がりを確認できます。';
+      trialOpenBtn.textContent = '仕上がりをテスト';
+    } else if (trialFresh) {
+      title.textContent = '仕上がりを確認できました';
+      note.textContent = 'この設定で音声全体の文字起こしを開始できます。';
+      trialOpenBtn.textContent = 'もう一度テスト';
+      startBtn.textContent = 'この設定で全体を文字起こし';
+    } else {
+      title.textContent = '仕上がりをテスト';
+      note.textContent = '短い区間で結果を確認してから、全体を始めるのがおすすめです。';
+      trialOpenBtn.textContent = job.lastTrial ? '設定を変えて再テスト' : '仕上がりをテスト';
+      startBtn.textContent = 'テストせず全体を文字起こし';
+    }
+  }
+  job._refreshSetupFlow = refreshSetupFlow;
+  refreshSetupFlow();
+
+  async function refreshTrialRangePreview() {
+    const start = parseTrialStart(trialStartInput.value);
+    const duration = Number(trialDurationInput.value) || 60;
+    if (start == null) {
+      trialRangePreviewReq++;
+      trialRangePreviewKey = '';
+      clearAudioObjectUrl(trialRangeAudio, job, '_trialRangePreviewUrl');
+      trialRangeStatus.textContent = '開始位置を確認してください';
+      trialRunBtn.disabled = false;
+      return;
+    }
+    const key = `${start}:${duration}`;
+    if (key === trialRangePreviewKey && job._trialRangePreviewUrl) return;
+    const myReq = ++trialRangePreviewReq;
+    trialRangePreviewKey = '';
+    trialRunBtn.disabled = true;
+    trialRangeStatus.textContent = '読み込み中…';
+    clearAudioObjectUrl(trialRangeAudio, job, '_trialRangePreviewUrl');
+    try {
+      const generate = typeof window.api.previewRange === 'function'
+        ? window.api.previewRange
+        : window.api.clipSegment;
+      const clip = await generate(filePath, start, start + duration);
+      const objectUrl = await createAudioObjectUrl(clip.wavPath);
+      if (myReq !== trialRangePreviewReq) { URL.revokeObjectURL(objectUrl); return; }
+      replaceAudioObjectUrl(trialRangeAudio, job, '_trialRangePreviewUrl', objectUrl);
+      trialRangePreviewKey = key;
+      trialRangeStatus.textContent = `${formatTrialStart(start)}〜${formatTrialStart(start + duration)}`;
+    } catch (error) {
+      if (myReq === trialRangePreviewReq) trialRangeStatus.textContent = `音声を読み込めません: ${error.message || error}`;
+    } finally {
+      if (myReq === trialRangePreviewReq && !job.activeTrialId) trialRunBtn.disabled = false;
+    }
+  }
+
+  const closeTrialModal = () => {
+    trialModal.classList.add('hidden');
+    trialRangeAudio.pause();
+    if (trialSharedStop) trialSharedStop();
+    trialOpenBtn.focus();
+  };
+  trialOpenBtn.addEventListener('click', () => {
+    if (!hasCompleteSettingChoice()) return;
+    trialModal.classList.remove('hidden');
+    refreshTrialRangePreview();
+    requestAnimationFrame(() => el.querySelector('.trial-start').focus());
+  });
+  trialStartInput.addEventListener('change', refreshTrialRangePreview);
+  trialDurationInput.addEventListener('change', refreshTrialRangePreview);
+  trialModal.querySelectorAll('[data-trial-close]').forEach((node) => {
+    node.addEventListener('click', closeTrialModal);
+  });
+  trialModal.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeTrialModal();
+  });
+  el.querySelector('.trial-use-btn').addEventListener('click', () => {
+    closeTrialModal();
+    startBtn.focus();
+  });
+  el.querySelector('.trial-adjust-btn').addEventListener('click', () => {
+    closeTrialModal();
+    const details = el.querySelector('.vad-details');
+    details.open = true;
+    requestAnimationFrame(() => {
+      details.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      details.querySelector('summary').focus();
+    });
+  });
 
   // 文字起こし開始
-  el.querySelector('.start-btn').addEventListener('click', () => {
-    startTranscribe(jobId, filePath, { denoiseStrength, vad: vadOptions() });
+  startBtn.addEventListener('click', () => {
+    if (!hasCompleteSettingChoice()) return;
+    trialModal.classList.add('hidden');
+    startTranscribe(jobId, filePath, job._getTranscribeOpts());
+  });
+
+  // 全体実行の前に、同じ設定で短い区間だけを確認する。
+  el.querySelector('.trial-btn').addEventListener('click', () => startTranscriptionTrial(jobId));
+  el.querySelector('.trial-cancel').addEventListener('click', async () => {
+    if (!job.activeTrialId) return;
+    const button = el.querySelector('.trial-cancel');
+    button.disabled = true;
+    try { await window.api.cancelTranscribeTrial(jobId, job.activeTrialId); }
+    catch (e) { el.querySelector('.trial-error').textContent = `中止できませんでした: ${e.message || e}`; }
   });
 
   // ---- 結果側の操作は「ジョブ生成時に1回だけ」束ねる ----

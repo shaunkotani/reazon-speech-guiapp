@@ -37,8 +37,10 @@ async function main() {
   registerMediaProtocol(protocol);
   let clipUsed = false;
   let lastTranscribeOpts = null;
+  let lastTrialOpts = null;
   ipcMain.on('clip-used', () => { clipUsed = true; });
   ipcMain.on('transcribe-opts', (_event, opts) => { lastTranscribeOpts = opts; });
+  ipcMain.on('trial-opts', (_event, opts) => { lastTrialOpts = opts; });
 
   const win = new BrowserWindow({
     show: false,
@@ -75,7 +77,10 @@ async function main() {
     'リアルタイムモードで録音パネルが表示され、録音開始が押せる');
   check(await run(`return [...document.querySelector('#rt-vad').options]
     .some((o) => o.value === 'interview' && o.textContent === 'インタビュー');`),
-    'リアルタイムの話し方にもインタビュープリセットが表示される');
+    'リアルタイムのシチュエーションにもインタビュープリセットが表示される');
+  check(await run(`return document.querySelector('#about-modal .about-repo-btn').dataset.url
+    === 'https://github.com/shaunkotani/reazon-speech-guiapp';`),
+    '情報画面にモコシのGitHubリポジトリへのリンクがある');
   await run(`document.querySelector('#mode-local').click()`);
   check(await run(`return !document.querySelector('#dropzone').classList.contains('hidden')
     && document.querySelector('#realtime').classList.contains('hidden');`),
@@ -89,9 +94,36 @@ async function main() {
   await waitFor(`document.querySelector('.job .audio-original').readyState >= 1`,
     '元音声プレビューのメタデータが読み込まれる');
   check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.audio-panel-label').textContent.trim() === '音声'
+      && j.querySelector('.job-setup').firstElementChild.classList.contains('audio-panel')
+      && j.querySelector('.denoise-row .plabel').textContent.trim() === 'ノイズの低減'
+      && j.querySelector('.scenario-stage h3').textContent.includes('音声に合う設定')
+      && j.querySelector('[data-scenario="normal"]')
+      && j.querySelector('[data-scenario="custom"]')
+      && j.querySelector('.vad-details summary').textContent.includes('さらに精度を調整');`),
+    'ファイル名直下から音声・工程・6種類の設定・詳しい設定の順に表示される');
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('[data-setup-step="1"]').classList.contains('is-current')
+      && !j.querySelector('.scenario-card.is-active')
+      && j.querySelector('.trial-open-btn').disabled
+      && j.querySelector('.start-btn').classList.contains('hidden');`),
+    '初期状態はシチュエーション選択が必須で、後工程を開始できない');
+  check(await run(`const j=document.querySelector('.job');
     return j.querySelector('.denoise-seg [data-value="0"]').classList.contains('is-active')
       && j.querySelector('.preview-btn').disabled;`),
     'ノイズ除去の初期値は「なし」');
+  await run(`document.querySelector('.job .vad-details summary').click()`);
+  check(await run(`return document.querySelector('.job .vad-details').open`),
+    '必要な場合だけ詳しい精度設定を開ける');
+  await run(`const j=document.querySelector('.job');
+    j.querySelector('.denoise-seg [data-value="0.5"]').click();
+    j.querySelector('.preview-btn').click();`);
+  await waitFor(`!document.querySelector('.job .denoised-row').classList.contains('hidden')
+    && document.querySelector('.job .audio-denoised').src.startsWith('blob:')`,
+    '折りたたみ内のノイズ低減プレビューが生成される');
+  check(await run(`return !document.querySelector('.job .audio-denoised').error`),
+    'ノイズ低減後の音声を読み込める');
+  await run(`document.querySelector('.job .denoise-seg [data-value="0"]').click()`);
   await waitFor(`document.querySelector('.job .vad-saved-select option[value="short-replies"]')`,
     '保存済みVADプリセットが読み込まれる');
   check(await run(`const j=document.querySelector('.job');
@@ -100,6 +132,35 @@ async function main() {
       && j.querySelector('.vad-min-speech').value === '0.15'
       && j.querySelector('.vad-sil').min === '0.05';`),
     '見直し後の標準値と無音長0.05秒が画面へ反映される');
+  await run(`document.querySelector('.job [data-scenario="custom"]').click()`);
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('[data-scenario="custom"]').classList.contains('is-active')
+      && !j.querySelector('.custom-choice-panel').classList.contains('hidden')
+      && j.querySelector('.custom-choice-select option[value="short-replies"]')
+      && j.querySelector('.trial-open-btn').disabled
+      && j.querySelector('[data-setup-step="1"]').classList.contains('is-current');`),
+    'カスタムは保存済み設定を選ぶまで工程1のままになる');
+  await run(`const s=document.querySelector('.job .custom-choice-select');
+    s.value='short-replies'; s.dispatchEvent(new Event('change'));`);
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.scenario-selected-name').textContent === '短い相槌'
+      && j.querySelector('.vad-max').value === '3'
+      && j.querySelector('.vad-sil').value === '0.05'
+      && j.querySelector('[data-setup-step="1"]').classList.contains('is-complete')
+      && j.querySelector('[data-setup-step="2"]').classList.contains('is-current')
+      && !j.querySelector('.trial-open-btn').disabled;`),
+    'カスタムで保存済み設定を選ぶと設定が適用され、工程2へ進む');
+  await run(`document.querySelector('.job [data-scenario="normal"]').click()`);
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('[data-scenario="normal"]').classList.contains('is-active')
+      && j.querySelector('.custom-choice-panel').classList.contains('hidden')
+      && j.querySelector('.scenario-selected-name').textContent === '通常'
+      && j.querySelector('.vad-max').value === '6'
+      && j.querySelector('.vad-sil').value === '0.2'
+      && j.querySelector('.vad-min-speech').value === '0.15'
+      && j.querySelector('.vad-th').value === '0.5'
+      && !j.querySelector('.trial-open-btn').disabled;`),
+    '通常は標準値を適用し、明示選択後に工程2へ進む');
   await run(`const j=document.querySelector('.job');
     j.querySelector('.vad-sil').value='0.05';
     j.querySelector('.vad-sil').dispatchEvent(new Event('input'));
@@ -108,8 +169,10 @@ async function main() {
   await waitFor(`document.querySelector('.job .vad-save-status').textContent === '保存しました'`,
     'カスタムVADプリセットが保存される');
   check(await run(`const s=document.querySelector('.job .vad-saved-select');
-    return [...s.options].some((o) => o.textContent === '検証用プリセット') && !!s.value;`),
-    '保存したカスタムプリセットを選択状態にできる');
+    return [...s.options].some((o) => o.textContent === '検証用プリセット') && !!s.value
+      && document.querySelector('.job [data-scenario="normal"]').classList.contains('is-active')
+      && !document.querySelector('.job .trial-open-btn').disabled;`),
+    '通常を選んだまま詳細設定を保存しても、工程の選択状態を保つ');
   await run(`return document.querySelector('.job .audio-original').play()`);
   await sleep(600);
   const preview = await run(`const a=document.querySelector('.job .audio-original');
@@ -135,8 +198,76 @@ async function main() {
       && j.querySelector('.vad-max').value === '3'
       && j.querySelector('.vad-sil').value === '0.1'
       && j.querySelector('.vad-min-speech').value === '0.15'
-      && j.querySelector('.vad-th').value === '0.2';`),
-    'インタビュープリセットへ指定値が入り、重なり再解析がON');
+      && j.querySelector('.vad-th').value === '0.2'
+      && j.querySelector('[data-setup-step="1"]').classList.contains('is-complete')
+      && j.querySelector('[data-setup-step="2"]').classList.contains('is-current')
+      && !j.querySelector('.trial-open-btn').disabled
+      && !j.querySelector('.start-btn').classList.contains('hidden');`),
+    'インタビュー選択で推奨値が入り、仕上がりテスト工程へ進む');
+  check(await run(`const j=document.querySelector('.job'); const s=getComputedStyle(j.querySelector('.trial-open-btn'));
+    return s.backgroundImage.includes('gradient') && Number(s.fontWeight) >= 700
+      && j.querySelector('.start-btn').textContent.includes('テストせず');`),
+    'テスト前は「仕上がりをテスト」が主操作になり、全体実行は控えめに表示される');
+
+  // 全体実行前の短区間テスト。独立モーダルを開き、既定の冒頭60秒を試す。
+  check(await run(`return document.querySelector('.job .trial-modal').classList.contains('hidden')`),
+    '短区間の確認ウィンドウは初期状態では閉じている');
+  await run(`document.querySelector('.job .trial-open-btn').click()`);
+  check(await run(`return !document.querySelector('.job .trial-modal').classList.contains('hidden')`),
+    '短区間の確認ボタンで独立ウィンドウが開く');
+  await waitFor(`document.querySelector('.job .trial-range-audio').src.startsWith('blob:')
+    && document.querySelector('.job .trial-range-status').textContent.includes('00:00〜01:00')
+    && document.querySelector('.job .trial-range-audio').readyState >= 1`,
+    'テスト範囲の音声プレビューが読み込まれる');
+  check(await run(`return document.querySelector('.job .trial-range-audio').readyState >= 1
+    && !document.querySelector('.job .trial-range-audio').error;`),
+    'テスト範囲の音声を再生バーで確認できる');
+  const firstRangeSrc = await run(`return document.querySelector('.job .trial-range-audio').src`);
+  await run(`const s=document.querySelector('.job .trial-duration'); s.value='30'; s.dispatchEvent(new Event('change'))`);
+  await waitFor(`document.querySelector('.job .trial-range-status').textContent.includes('00:00〜00:30')
+    && document.querySelector('.job .trial-range-audio').src !== ${JSON.stringify(firstRangeSrc)}`,
+    '指定範囲を変えると音声プレビューも更新される');
+  await run(`const s=document.querySelector('.job .trial-duration'); s.value='60'; s.dispatchEvent(new Event('change'))`);
+  await waitFor(`document.querySelector('.job .trial-range-status').textContent.includes('00:00〜01:00')`,
+    'テスト範囲を既定の60秒へ戻す');
+  await run(`document.querySelector('.job .trial-btn').click()`);
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.trial-start').disabled && j.querySelector('.trial-duration').disabled;`),
+    '仕上がりテスト中は再生範囲を固定する');
+  await waitFor(`!document.querySelector('.job .trial-result').classList.contains('hidden')`,
+    '短区間の試し文字起こし結果が表示される');
+  check(lastTrialOpts && lastTrialOpts.range.startSeconds === 0 && lastTrialOpts.range.durationSeconds === 60,
+    '試し文字起こしへ既定の冒頭60秒が渡される');
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelectorAll('.trial-seg').length === 3
+      && j.querySelector('.trial-result-meta').textContent.includes('00:00')
+      && !j.querySelector('.trial-fresh').classList.contains('hidden')
+      && !j.querySelector('.trial-use-btn').disabled
+      && !j.querySelector('.trial-start').disabled && !j.querySelector('.trial-duration').disabled
+      && j.querySelector('.start-btn').textContent.includes('この設定で全体')
+      && j.querySelector('[data-setup-step="3"]').classList.contains('is-current');`),
+    'テスト結果を確認すると全体文字起こしが次の工程になる');
+  await run(`const j=document.querySelector('.job');
+    j.querySelector('.vad-max').value='4';
+    j.querySelector('.vad-max').dispatchEvent(new Event('input'));`);
+  check(await run(`const j=document.querySelector('.job');
+    return !j.querySelector('.trial-stale').classList.contains('hidden') && j.querySelector('.trial-use-btn').disabled;`),
+    '試行後に設定を変更すると再試行の警告が出る');
+  await run(`document.querySelector('.job [data-preset="interview"]').click()`);
+  check(await run(`return document.querySelector('.job .trial-stale').classList.contains('hidden')`),
+    '試した設定へ戻すと確認済み状態へ戻る');
+  await run(`document.querySelector('#high-accuracy').click()`);
+  await sleep(50);
+  check(await run(`return !document.querySelector('.job .trial-stale').classList.contains('hidden')`),
+    'アプリ共通の高精度設定を変えても再試行の警告が出る');
+  await run(`document.querySelector('#high-accuracy').click()`);
+  await sleep(50);
+  check(await run(`return document.querySelector('.job .trial-stale').classList.contains('hidden')`),
+    '高精度設定も試行時へ戻すと確認済み状態へ戻る');
+  await run(`document.querySelector('.job .trial-use-btn').click()`);
+  check(await run(`return document.querySelector('.job .trial-modal').classList.contains('hidden')`),
+    '「この設定で進む」で確認ウィンドウを閉じて全体実行へ進める');
+
   await run(`document.querySelector('.job .start-btn').click()`);
   await waitFor(`document.querySelector('.job .progress-stage').textContent.includes('開始待ち')`,
     'キューの待機順が表示される');
@@ -167,17 +298,18 @@ async function main() {
     return job.el.querySelector('.health-text').textContent === '通常より時間がかかっています'
       && !job.el.querySelector('.progress-warning').classList.contains('hidden');`),
     '更新が長く止まった工程はエラーと断定せず遅延警告を表示する');
-  await waitFor(`document.querySelectorAll('.job .seg-play').length === 3`, '文字起こし結果が描画される');
+  await waitFor(`document.querySelectorAll('.job-result .segments .seg-play').length === 3`, '文字起こし結果が描画される');
   check(lastTranscribeOpts && lastTranscribeOpts.denoiseStrength === 0,
     '文字起こしへノイズ除去「なし」が渡される');
   check(lastTranscribeOpts && lastTranscribeOpts.vad.preset === 'interview'
+      && lastTranscribeOpts.vad.scenario === 'interview'
       && lastTranscribeOpts.vad.minSpeechDuration === 0.15
       && lastTranscribeOpts.vad.threshold === 0.2,
     '文字起こしへインタビュープリセットの値が渡される');
 
   check(await run(`return !document.querySelector('.job .job-result').classList.contains('hidden')`),
     '文字起こし後に結果欄が表示される');
-  check(await run(`return document.querySelectorAll('.job .seg-play').length === 3`),
+  check(await run(`return document.querySelectorAll('.job-result .segments .seg-play').length === 3`),
     '各行に ▶ ボタンがある');
   check(!(await run(`return document.querySelector('.job .result-audio-row').classList.contains('hidden')`)),
     '全体プレイヤーの行が表示されている（読み込み直後）');
@@ -190,12 +322,12 @@ async function main() {
     `全体プレイヤーが音源を読み込めた (readyState=${st.ready} duration=${st.dur} error=${st.err || 'なし'})`);
 
   // 3番目の区間を再生（12.36s へ頭出し）
-  await run(`document.querySelectorAll('.job .seg-play')[2].click()`);
+  await run(`document.querySelectorAll('.job-result .segments .seg-play')[2].click()`);
   await sleep(1200);
   const play = await run(`const a = document.querySelector('.job .audio-result');
     return { ct: a.currentTime, paused: a.paused, err: a.error && a.error.code,
       rowHidden: document.querySelector('.job .result-audio-row').classList.contains('hidden'),
-      btn: document.querySelectorAll('.job .seg-play')[2].textContent };`);
+      btn: document.querySelectorAll('.job-result .segments .seg-play')[2].textContent };`);
 
   check(!play.rowHidden, '▶ を押しても全体プレイヤーの行が消えない');
   check(!play.err, `再生でメディアエラーが出ない (error=${play.err || 'なし'})`);
@@ -205,10 +337,10 @@ async function main() {
   check(!clipUsed, 'クリップ生成のフォールバックに落ちていない');
 
   // 区間末で自動停止するか（12.36-18.81 なので終端まで待たず、停止操作で確認）
-  await run(`document.querySelectorAll('.job .seg-play')[2].click()`);
+  await run(`document.querySelectorAll('.job-result .segments .seg-play')[2].click()`);
   await sleep(300);
   const stopped = await run(`const a = document.querySelector('.job .audio-result');
-    return { paused: a.paused, btn: document.querySelectorAll('.job .seg-play')[2].textContent };`);
+    return { paused: a.paused, btn: document.querySelectorAll('.job-result .segments .seg-play')[2].textContent };`);
   check(stopped.paused && stopped.btn === '▶', 'もう一度押すと停止して ▶ に戻る');
 
   // 「設定を変えてやり直す」→ 再実行後も再生が生きているか
@@ -216,9 +348,9 @@ async function main() {
   await run(`document.querySelector('.job .redo-btn').click()`);
   await waitFor(`!document.querySelector('.job .job-setup').classList.contains('hidden')`, 'やり直しで設定画面に戻る');
   await run(`document.querySelector('.job .start-btn').click()`);
-  await waitFor(`document.querySelectorAll('.job .seg-play').length === 3`, '再実行の結果が描画される');
+  await waitFor(`document.querySelectorAll('.job-result .segments .seg-play').length === 3`, '再実行の結果が描画される');
   await sleep(800);
-  await run(`document.querySelectorAll('.job .seg-play')[0].click()`);
+  await run(`document.querySelectorAll('.job-result .segments .seg-play')[0].click()`);
   await sleep(800);
   const redo = await run(`const a = document.querySelector('.job .audio-result');
     return { ct: a.currentTime, paused: a.paused, err: a.error && a.error.code,
@@ -229,6 +361,7 @@ async function main() {
   // 構造化エラーが利用者向け説明と再試行導線へ変換されるか
   await run(`document.querySelector('#pick-btn').click()`);
   await waitFor(`document.querySelectorAll('.job').length === 2`, 'エラー表示検証用のジョブが作られる');
+  await run(`document.querySelector('.job [data-scenario="interview"]').click()`);
   await run(`document.querySelector('.job .start-btn').click()`);
   await waitFor(`!document.querySelector('.job .job-error').classList.contains('hidden')`,
     '文字起こし失敗の説明が表示される');

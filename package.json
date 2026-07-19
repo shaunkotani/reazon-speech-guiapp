@@ -1,6 +1,6 @@
 {
   "name": "reazonspeech",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "ローカルで動作する日本語文字起こしアプリ（ReazonSpeech / sherpa-onnx）",
   "main": "src/main/main.js",
   "scripts": {
@@ -10,6 +10,8 @@
     "test:renderer": "electron scripts/test-renderer-playback.js",
     "test:progress": "node scripts/test-transcription-progress.js",
     "test:queue": "node scripts/test-serial-job-queue.js",
+    "test:range": "node scripts/test-transcription-range.js",
+    "test:range-worker": "node scripts/test-transcription-range-worker.js",
     "test:realtime": "node scripts/test-realtime-worker.js",
     "fetch:ffmpeg": "node scripts/fetch-ffmpeg.js",
     "dist:mac": "electron-builder --mac --arm64",
