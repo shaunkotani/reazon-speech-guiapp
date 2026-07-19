@@ -17,6 +17,9 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let transcribeStatusListener = noop;
 let trialStatusListener = noop;
 let transcribeCalls = 0;
+let appPreferences = { confirmOnCloseWithUnsaved: true };
+let nextExportSaved = true;
+let nextAudioSaved = false;
 let savedVadPresets = [{
   id: 'short-replies', name: '短い相槌',
   maxSpeechDuration: 3, minSilenceDuration: 0.05, minSpeechDuration: 0.05, threshold: 0.65,
@@ -45,6 +48,15 @@ const TRIAL_RESULT = {
 };
 
 contextBridge.exposeInMainWorld('api', {
+  getAppPreferences: async () => ({ ...appPreferences }),
+  setAppPreferences: async (value) => {
+    appPreferences = {
+      confirmOnCloseWithUnsaved: value.confirmOnCloseWithUnsaved !== false,
+    };
+    ipcRenderer.send('app-preferences', appPreferences);
+    return { ...appPreferences };
+  },
+  updateUnsavedState: (value) => ipcRenderer.send('unsaved-state', value),
   modelStatus: async () => ({ ready: true, source: 'test' }),
   downloadModel: async () => ({ ready: true }),
   onModelProgress: noop,
@@ -148,8 +160,18 @@ contextBridge.exposeInMainWorld('api', {
   rtCancel: async () => ({ ok: true }),
   onRtSegment: noop,
   onRtError: noop,
-  rtSaveWav: async () => ({ saved: false }),
-  saveExport: async () => ({ ok: true }),
+  testSetNextAudioSaved: (saved) => { nextAudioSaved = !!saved; },
+  rtSaveWav: async () => {
+    const saved = nextAudioSaved;
+    nextAudioSaved = false;
+    return saved ? { saved: true, path: 'recording.wav' } : { saved: false };
+  },
+  testSetNextExportSaved: (saved) => { nextExportSaved = !!saved; },
+  saveExport: async () => {
+    const saved = nextExportSaved;
+    nextExportSaved = true;
+    return saved ? { saved: true, path: 'test.txt' } : { saved: false };
+  },
   checkUpdate: async () => ({}),
   downloadUpdate: async () => ({}),
   installUpdate: async () => ({}),

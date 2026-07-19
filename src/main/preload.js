@@ -8,6 +8,11 @@ function mediaUrl(absPath) {
 }
 
 contextBridge.exposeInMainWorld('api', {
+  // アプリ設定と、終了確認に使う未保存状態の通知
+  getAppPreferences: () => ipcRenderer.invoke('app-preferences:get'),
+  setAppPreferences: (value) => ipcRenderer.invoke('app-preferences:set', value),
+  updateUnsavedState: (value) => ipcRenderer.send('app:unsaved-state', value),
+
   // モデル
   modelStatus: () => ipcRenderer.invoke('model:status'),
   downloadModel: () => ipcRenderer.invoke('model:download'),

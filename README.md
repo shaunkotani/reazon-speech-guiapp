@@ -43,6 +43,7 @@ src/
   renderer/            UI（HTML/CSS/JS）
   shared/export.js     TXT/SRT/VTT/JSON 整形
   shared/overlap.js    重なり区間の候補生成・合意選択・統合
+  shared/unsavedState.js 終了時の未保存状態・確認内容の共通判定
 scripts/test-pipeline.js  CLI 動作確認
 ```
 
@@ -57,6 +58,7 @@ npm run test:overlap                    # 重なり補正の純JS回帰テスト
 npm run test:progress                   # 工程・ETA・エラー分類の純JS回帰テスト
 npm run test:queue                      # 複数ファイル待機キューの純JS回帰テスト
 npm run test:range                      # 試し文字起こしの範囲・時刻補正テスト
+npm run test:unsaved                    # 未保存状態・終了確認内容の純JS回帰テスト
 npm run test:range-worker               # 実モデルで短区間デコードを確認（モデルがある開発環境向け）
 npm run test:renderer                   # プリセット保存・音声再生の画面回帰テスト
 ```

@@ -13,7 +13,10 @@
       <h1>モコシ</h1>
       <p class="sub">日本語音声・動画をローカルで文字起こし（オフライン）</p>
     </div>
-    <button id="about-btn" class="about-btn" title="このアプリ・ライセンスについて">ⓘ 情報</button>
+    <div class="header-actions">
+      <button id="settings-btn" class="header-action-btn" title="アプリの設定">⚙ 設定</button>
+      <button id="about-btn" class="header-action-btn about-btn" title="このアプリ・ライセンスについて">ⓘ 情報</button>
+    </div>
   </header>
 
   <!-- モデル未取得バナー -->
@@ -405,7 +408,6 @@
         <div class="toolbar">
           <span class="meta"></span>
           <span class="spacer"></span>
-          <button class="redo-btn" title="ノイズの低減やシチュエーションの設定を変えて、同じ音声をもう一度文字起こしします">設定を変えてやり直す</button>
           <button class="save-audio-btn hidden" title="録音した音声を WAV ファイルとして保存します（アプリ終了時に一時録音は削除されます）">録音を保存</button>
           <button class="tag-btn">話者でタグ付け</button>
           <label class="merge-toggle hidden" title="保存・コピー時に、連続する同じ話者の発言を1つにまとめます">
@@ -430,9 +432,44 @@
           </div>
         </div>
         <div class="segments"></div>
+        <div class="result-rework">
+          <div class="result-rework-copy">
+            <strong>認識結果を調整したい場合</strong>
+            <small>設定画面に戻ります。新しく開始するまでは、この結果に戻れます。</small>
+          </div>
+          <button class="redo-btn" title="ノイズの低減や音声に合う設定を変えて、同じ音声をもう一度文字起こしします">
+            <span class="redo-icon" aria-hidden="true">↻</span>
+            <span>設定を変えてやり直す</span>
+          </button>
+        </div>
       </div>
     </div>
   </template>
+
+  <!-- アプリ設定 -->
+  <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-backdrop" data-settings-close></div>
+    <div class="modal-card settings-modal-card">
+      <div class="modal-head">
+        <h2 id="settings-title">設定</h2>
+        <button class="modal-close" data-settings-close aria-label="閉じる">×</button>
+      </div>
+      <div class="modal-body">
+        <section class="settings-section">
+          <h3>終了時の確認</h3>
+          <label class="settings-toggle-row">
+            <span>
+              <strong>未保存の内容があるとき、終了前に確認する</strong>
+              <small>文字起こし結果、録音、用語辞書などを保存せず閉じようとした場合に確認します。</small>
+            </span>
+            <input type="checkbox" id="confirm-unsaved-close" checked />
+          </label>
+          <p class="settings-note">終了確認で「次回から確認しない」を選んだ場合も、ここで再びオンにできます。録音中・処理中は、この設定にかかわらず確認します。</p>
+          <span id="settings-status" class="settings-status" role="status"></span>
+        </section>
+      </div>
+    </div>
+  </div>
 
   <!-- このアプリについて / ライセンス -->
   <div id="about-modal" class="modal hidden">
@@ -485,6 +522,7 @@
   </div>
 
   <script src="../shared/transcriptionProgress.js"></script>
+  <script src="../shared/unsavedState.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

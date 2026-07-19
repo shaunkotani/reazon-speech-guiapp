@@ -38,9 +38,13 @@ async function main() {
   let clipUsed = false;
   let lastTranscribeOpts = null;
   let lastTrialOpts = null;
+  let lastUnsavedState = null;
+  let lastAppPreferences = null;
   ipcMain.on('clip-used', () => { clipUsed = true; });
   ipcMain.on('transcribe-opts', (_event, opts) => { lastTranscribeOpts = opts; });
   ipcMain.on('trial-opts', (_event, opts) => { lastTrialOpts = opts; });
+  ipcMain.on('unsaved-state', (_event, value) => { lastUnsavedState = value; });
+  ipcMain.on('app-preferences', (_event, value) => { lastAppPreferences = value; });
 
   const win = new BrowserWindow({
     show: false,
@@ -62,6 +66,43 @@ async function main() {
       await sleep(100);
     }
   }
+
+  // 設定画面。終了確認を無効にした後も、この画面から戻せることを確認する。
+  await run(`document.querySelector('#settings-btn').click()`);
+  await waitFor(`!document.querySelector('#settings-modal').classList.contains('hidden')`,
+    '設定画面が開く');
+  check(await run(`return document.querySelector('#confirm-unsaved-close').checked
+    && document.querySelector('.settings-note').textContent.includes('再びオン')
+    && document.querySelector('.settings-note').textContent.includes('処理中');`),
+    '設定画面に終了確認の切替と復帰方法が表示される');
+  await run(`const c=document.querySelector('#confirm-unsaved-close');
+    c.checked=false; c.dispatchEvent(new Event('change'));`);
+  await waitFor(`document.querySelector('#settings-status').textContent === '変更しました'`,
+    '終了確認設定が保存される');
+  await sleep(50);
+  check(lastAppPreferences && lastAppPreferences.confirmOnCloseWithUnsaved === false,
+    '「次回から確認しない」と同じ設定を画面から無効にできる');
+  await run(`const c=document.querySelector('#confirm-unsaved-close');
+    c.checked=true; c.dispatchEvent(new Event('change'));`);
+  await waitFor(`document.querySelector('#confirm-unsaved-close').checked
+    && document.querySelector('#settings-status').textContent === '変更しました'`,
+    '終了確認設定を再度有効にできる');
+  await run(`document.querySelector('#settings-modal [data-settings-close]').click()`);
+  check(await run(`return document.querySelector('#settings-modal').classList.contains('hidden')`),
+    '設定画面を閉じられる');
+
+  // 明示保存型の用語辞書は、編集から保存成功まで未保存として通知する。
+  await waitFor(`typeof collectUnsavedState === 'function'`, '未保存状態の監視が初期化される');
+  await run(`const t=document.querySelector('#hotwords-text'); t.value='検証語';
+    t.dispatchEvent(new Event('input'));`);
+  check(await run(`return collectUnsavedState().dictionaryChanged`)
+      && lastUnsavedState && lastUnsavedState.dictionaryChanged,
+    '用語辞書を編集すると未保存状態になる');
+  await run(`document.querySelector('#hotwords-save').click()`);
+  await waitFor(`document.querySelector('#hotwords-status').textContent.includes('保存しました')`,
+    '用語辞書の保存が完了する');
+  check(await run(`return !collectUnsavedState().dictionaryChanged`),
+    '用語辞書の保存成功後は未保存状態を解除する');
 
   // 入力モード切替（既定はローカル。リアルタイムへ切替で録音パネル表示+事前準備）
   check(await run(`return document.querySelector('#mode-local').classList.contains('is-active')
@@ -165,7 +206,10 @@ async function main() {
     j.querySelector('.vad-sil').value='0.05';
     j.querySelector('.vad-sil').dispatchEvent(new Event('input'));
     j.querySelector('.vad-preset-name').value='検証用プリセット';
-    j.querySelector('.vad-save').click();`);
+    j.querySelector('.vad-preset-name').dispatchEvent(new Event('input'));`);
+  check(await run(`return collectUnsavedState().presetDraftCount === 1`),
+    '名前を付けた未保存のカスタム設定を検出する');
+  await run(`document.querySelector('.job .vad-save').click()`);
   await waitFor(`document.querySelector('.job .vad-save-status').textContent === '保存しました'`,
     'カスタムVADプリセットが保存される');
   check(await run(`const s=document.querySelector('.job .vad-saved-select');
@@ -173,6 +217,8 @@ async function main() {
       && document.querySelector('.job [data-scenario="normal"]').classList.contains('is-active')
       && !document.querySelector('.job .trial-open-btn').disabled;`),
     '通常を選んだまま詳細設定を保存しても、工程の選択状態を保つ');
+  check(await run(`return collectUnsavedState().presetDraftCount === 0`),
+    'カスタム設定の保存成功後は未保存状態を解除する');
   await run(`return document.querySelector('.job .audio-original').play()`);
   await sleep(600);
   const preview = await run(`const a=document.querySelector('.job .audio-original');
@@ -269,6 +315,8 @@ async function main() {
     '「この設定で進む」で確認ウィンドウを閉じて全体実行へ進める');
 
   await run(`document.querySelector('.job .start-btn').click()`);
+  check(await run(`return collectUnsavedState().activeJobCount === 1`),
+    '処理開始直後は終了時に常に確認する状態になる');
   await waitFor(`document.querySelector('.job .progress-stage').textContent.includes('開始待ち')`,
     'キューの待機順が表示される');
   check(await run(`const j=document.querySelector('.job');
@@ -309,8 +357,40 @@ async function main() {
 
   check(await run(`return !document.querySelector('.job .job-result').classList.contains('hidden')`),
     '文字起こし後に結果欄が表示される');
+  check(await run(`const s=collectUnsavedState(); return s.activeJobCount === 0 && s.resultCount === 1;`),
+    '文字起こし完了後は未保存の結果として通知する');
   check(await run(`return document.querySelectorAll('.job-result .segments .seg-play').length === 3`),
     '各行に ▶ ボタンがある');
+  check(await run(`const j=document.querySelector('.job');
+    const redo=j.querySelector('.redo-btn');
+    const redoStyle=getComputedStyle(redo);
+    const tagStyle=getComputedStyle(j.querySelector('.tag-btn'));
+    return !j.querySelector('.toolbar .redo-btn')
+      && j.querySelector('.segments').nextElementSibling === j.querySelector('.result-rework')
+      && j.querySelector('.result-rework-copy small').textContent.includes('この結果に戻れます')
+      && redoStyle.borderTopStyle === 'solid'
+      && redoStyle.backgroundColor !== tagStyle.backgroundColor;`),
+    'やり直し操作は保存・話者操作から分離し、結果末尾に異なる見た目で表示される');
+  check(await run(`const before=collectUnsavedState().resultCount;
+    plainTextWithSpeakers(jobs.get(1));
+    return before === 1 && collectUnsavedState().resultCount === 1;`),
+    'コピー用テキストの生成だけでは保存済み扱いにしない');
+  await run(`window.api.testSetNextExportSaved(false);
+    document.querySelector('.job [data-fmt="txt"]').click()`);
+  await sleep(50);
+  check(await run(`return collectUnsavedState().resultCount === 1`),
+    '保存ダイアログをキャンセルした場合は未保存状態を保つ');
+  await run(`document.querySelector('.job [data-fmt="txt"]').click()`);
+  await waitFor(`collectUnsavedState().resultCount === 0`, '文字起こし結果の保存状態が更新される');
+  check(true, '文字起こし結果のファイル保存成功後は未保存状態を解除する');
+  await run(`document.querySelector('.job .tag-btn').click()`);
+  await waitFor(`!document.querySelector('.job .diar-edit').classList.contains('hidden')`,
+    '話者タグ付け画面が開く');
+  await run(`const s=document.querySelector('.job .seg-spk'); s.value='0'; s.dispatchEvent(new Event('change'));`);
+  check(await run(`return collectUnsavedState().resultCount === 1`),
+    '保存後に話者情報を変更すると再び未保存になる');
+  await run(`document.querySelector('.job [data-fmt="txt"]').click()`);
+  await waitFor(`collectUnsavedState().resultCount === 0`, '話者変更後の結果が再保存される');
   check(!(await run(`return document.querySelector('.job .result-audio-row').classList.contains('hidden')`)),
     '全体プレイヤーの行が表示されている（読み込み直後）');
 
@@ -372,6 +452,22 @@ async function main() {
       && !j.querySelector('.retry-btn').classList.contains('hidden')
       && !j.querySelector('.job-setup').classList.contains('hidden');`),
     '失敗工程・技術情報・再試行ボタンを示し、設定画面へ戻る');
+
+  // リアルタイム録音は文字起こし結果とは別に、WAV保存の成否を追跡する。
+  await run(`addRealtimeResultJob({
+    segments:[{start:0,end:1,text:'録音テスト'}], duration:1,
+    wavPath:${JSON.stringify(path.join(__dirname, '..', 'samples', 'test.wav'))}, name:'録音テスト.wav'
+  })`);
+  check(await run(`return collectUnsavedState().recordingCount === 1`),
+    'リアルタイム録音の結果は未保存の録音として通知する');
+  await run(`document.querySelector('.job .save-audio-btn').click()`);
+  await sleep(50);
+  check(await run(`return collectUnsavedState().recordingCount === 1`),
+    '録音の保存ダイアログをキャンセルした場合は未保存状態を保つ');
+  await run(`window.api.testSetNextAudioSaved(true);
+    document.querySelector('.job .save-audio-btn').click()`);
+  await waitFor(`collectUnsavedState().recordingCount === 0`, '録音の保存状態が更新される');
+  check(true, '録音のファイル保存成功後は未保存状態を解除する');
 
   const errLogs = logs.filter((l) => /error|失敗|unavailable|interrupted/i.test(l));
   if (errLogs.length) { console.log('\n-- renderer console --'); errLogs.forEach((l) => console.log('  ' + l)); }

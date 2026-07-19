@@ -12,6 +12,7 @@ const { assignByReferences, UNKNOWN_THRESHOLD } = require('../shared/cluster');
 const overlapTools = require('../shared/overlap');
 const transcriptionProgress = require('../shared/transcriptionProgress');
 const rangeTools = require('../shared/transcriptionRange');
+const unsavedState = require('../shared/unsavedState');
 const SerialJobQueue = require('./serialJobQueue');
 const { registerMediaProtocol, MEDIA_MIME } = require('./mediaProtocol');
 
@@ -29,6 +30,10 @@ app.setPath('userData', path.join(app.getPath('appData'), 'reazonspeech'));
 const appIconPath = path.join(__dirname, '..', '..', 'build', 'icon.png');
 
 let mainWindow = null;
+let latestUnsavedState = unsavedState.normalizeState({});
+let allowCloseOnce = false;
+let closeDialogOpen = false;
+let quitRequested = false;
 const previewDir = path.join(os.tmpdir(), 'reazonspeech-preview');
 const cancelled = new Set(); // 中止された jobId
 const jobEmbeddings = new Map(); // jobId -> number[][]（区間順、手本ベース再識別用）
@@ -68,6 +73,35 @@ function readSettings() {
 function writeSettings(s) {
   fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
   fs.writeFileSync(settingsPath(), JSON.stringify(s, null, 2), 'utf8');
+}
+
+function appPreferences() {
+  return unsavedState.normalizePreferences(readSettings());
+}
+
+function saveAppPreferences(value) {
+  const prefs = unsavedState.normalizePreferences(value);
+  const settings = readSettings();
+  settings.confirmOnCloseWithUnsaved = prefs.confirmOnCloseWithUnsaved;
+  writeSettings(settings);
+  return prefs;
+}
+
+async function confirmAppCloseIfNeeded() {
+  const prefs = appPreferences();
+  if (!unsavedState.shouldConfirm(latestUnsavedState, prefs)) return true;
+  if (closeDialogOpen || !mainWindow || mainWindow.isDestroyed()) return false;
+  closeDialogOpen = true;
+  try {
+    const result = await dialog.showMessageBox(mainWindow, unsavedState.buildDialogOptions(latestUnsavedState));
+    if (result.response !== 0) return false;
+    if (result.checkboxChecked && !unsavedState.hasActiveWork(latestUnsavedState)) {
+      saveAppPreferences({ confirmOnCloseWithUnsaved: false });
+    }
+    return true;
+  } finally {
+    closeDialogOpen = false;
+  }
 }
 
 // ---- ユーザー定義 VAD プリセットの永続化 ----
@@ -401,6 +435,13 @@ ipcMain.handle('rt:saveWav', async (event, wavPath, suggestedName) => {
 });
 
 // ---- IPC ----
+ipcMain.handle('app-preferences:get', () => appPreferences());
+ipcMain.handle('app-preferences:set', (event, value) => saveAppPreferences(value));
+ipcMain.on('app:unsaved-state', (event, value) => {
+  if (mainWindow && !mainWindow.isDestroyed() && event.sender !== mainWindow.webContents) return;
+  latestUnsavedState = unsavedState.normalizeState(value);
+});
+
 ipcMain.handle('model:status', () => {
   const r = resolveModels();
   return { ready: r.ready, source: r.source };
@@ -966,6 +1007,8 @@ ipcMain.handle('app:uninstall', async () => {
   await new Promise((r) => setTimeout(r, 250));
   removeKnownData();
   if (process.platform === 'win32') scheduleWindowsUninstall();
+  // 直前に二段階の削除確認を終えているため、通常の未保存確認は重ねない。
+  allowCloseOnce = true;
   setTimeout(() => app.quit(), 200);
   return { ok: true, platform: process.platform };
 });
@@ -1010,8 +1053,10 @@ ipcMain.handle('update:download', async () => {
   return { ok: true };
 });
 
-ipcMain.handle('update:install', () => {
+ipcMain.handle('update:install', async () => {
   if (!updaterEnabled()) return { ok: false, reason: 'disabled' };
+  if (!(await confirmAppCloseIfNeeded())) return { ok: false, cancelled: true };
+  allowCloseOnce = true;
   destroyPool(); // ワーカーを止めてからインストーラへ
   destroyRtWorker();
   // isSilent=false（インストーラUIを表示）, isForceRunAfter=true（更新後に再起動）
@@ -1028,6 +1073,9 @@ function checkForUpdatesOnStartup() {
 }
 
 function createWindow() {
+  allowCloseOnce = false;
+  quitRequested = false;
+  latestUnsavedState = unsavedState.normalizeState({});
   mainWindow = new BrowserWindow({
     width: 980,
     height: 760,
@@ -1040,6 +1088,24 @@ function createWindow() {
     },
   });
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  mainWindow.on('close', (event) => {
+    if (allowCloseOnce || !unsavedState.shouldConfirm(latestUnsavedState, appPreferences())) return;
+    event.preventDefault();
+    if (closeDialogOpen) return;
+    confirmAppCloseIfNeeded().then((approved) => {
+      if (!approved || !mainWindow || mainWindow.isDestroyed()) {
+        quitRequested = false;
+        return;
+      }
+      allowCloseOnce = true;
+      if (quitRequested) app.quit();
+      else mainWindow.close();
+    }).catch((error) => {
+      quitRequested = false;
+      console.error('終了確認を表示できませんでした:', error);
+    });
+  });
+  mainWindow.on('closed', () => { mainWindow = null; });
   // リロード等で renderer が消えると音声チャンクの供給元が失われるため、
   // 取り残されたリアルタイムセッションは読み込みのたびに破棄する（初回は no-op）。
   mainWindow.webContents.on('did-finish-load', () => destroyRtWorker());
@@ -1055,7 +1121,16 @@ app.whenReady().then(() => {
   // 起動直後に静かに更新チェック（UIが受け取れるよう少し遅らせる）
   mainWindow.webContents.once('did-finish-load', () => setTimeout(checkForUpdatesOnStartup, 1500));
 });
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (allowCloseOnce || !mainWindow || mainWindow.isDestroyed()
+    || !unsavedState.shouldConfirm(latestUnsavedState, appPreferences())) return;
+  event.preventDefault();
+  quitRequested = true;
+  mainWindow.close();
+});
+// ウィンドウの終了確認がキャンセルされた場合に認識器を先に破棄しないよう、
+// 実際の終了が確定してから後始末する。
+app.on('will-quit', () => {
   destroyPool();
   destroyRtWorker();
   // 一時ファイルを掃除

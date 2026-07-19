@@ -10,15 +10,75 @@ const pickBtn = $('#pick-btn');
 const jobsEl = $('#jobs');
 const jobTpl = $('#job-template');
 const transcriptionProgress = window.TranscriptionProgress;
+const unsavedState = window.UnsavedState;
 
 let modelReady = false;
 let jobSeq = 0;
 let previewSeq = 0; // プレビュー生成リクエストの一意ID
 let trialSeq = 0;   // 短区間テストの一意ID
+let recognizerConfigLoaded = false;
+let realtimeRecordingActive = false;
+let lastUnsavedStateJson = '';
 let savedRecognizerConfig = {
   highAccuracy: false, hotwordsText: '', hotwordsScore: 2, hotwordsEnabled: true,
 };
 const jobs = new Map(); // jobId -> { el, filePath, result }
+
+function normalizedDictionaryConfig() {
+  return {
+    hotwordsText: document.querySelector('#hotwords-text')
+      ? $('#hotwords-text').value.split('\n').map((line) => line.trim()).filter(Boolean).join('\n')
+      : '',
+    hotwordsScore: document.querySelector('#hotwords-score') ? Number($('#hotwords-score').value) : 2,
+    hotwordsEnabled: document.querySelector('#hotwords-enabled')
+      ? $('#hotwords-enabled').checked
+      : true,
+  };
+}
+
+function dictionaryHasUnsavedChanges() {
+  if (!recognizerConfigLoaded) return false;
+  const current = normalizedDictionaryConfig();
+  return current.hotwordsText !== savedRecognizerConfig.hotwordsText
+    || current.hotwordsScore !== Number(savedRecognizerConfig.hotwordsScore)
+    || current.hotwordsEnabled !== savedRecognizerConfig.hotwordsEnabled;
+}
+
+function collectUnsavedState() {
+  let resultCount = 0;
+  let recordingCount = 0;
+  let presetDraftCount = 0;
+  let activeJobCount = 0;
+  jobs.forEach((job) => {
+    if (job.result && job.resultRevision !== job.savedResultRevision) resultCount++;
+    if (job.isRecording && !job.recordingSaved) recordingCount++;
+    if (typeof job._hasUnsavedPreset === 'function' && job._hasUnsavedPreset()) presetDraftCount++;
+    if (job.isTranscribing || job.activeTrialId || job.isEmbedding || job.isReassigning) activeJobCount++;
+  });
+  return unsavedState.normalizeState({
+    resultCount,
+    recordingCount,
+    dictionaryChanged: dictionaryHasUnsavedChanges(),
+    presetDraftCount,
+    activeJobCount,
+    recordingActive: realtimeRecordingActive,
+  });
+}
+
+function reportUnsavedState() {
+  if (!unsavedState || typeof window.api.updateUnsavedState !== 'function') return;
+  const value = collectUnsavedState();
+  const serialized = JSON.stringify(value);
+  if (serialized === lastUnsavedStateJson) return;
+  lastUnsavedStateJson = serialized;
+  window.api.updateUnsavedState(value);
+}
+
+function markJobResultChanged(job) {
+  if (!job || !job.result) return;
+  job.resultRevision = (job.resultRevision || 0) + 1;
+  reportUnsavedState();
+}
 
 function fmtTime(sec) {
   const s = Math.floor(sec);
@@ -151,9 +211,12 @@ accToggle.addEventListener('change', async () => {
   catch (e) { alert(`高精度モードの保存に失敗: ${e.message}`); }
 });
 
-hwScore.addEventListener('input', () => { hwScoreVal.textContent = Number(hwScore.value).toFixed(1); });
-hwText.addEventListener('input', updateHotwordsSummary);
-hwEnabled.addEventListener('change', updateHotwordsSummary);
+hwScore.addEventListener('input', () => {
+  hwScoreVal.textContent = Number(hwScore.value).toFixed(1);
+  reportUnsavedState();
+});
+hwText.addEventListener('input', () => { updateHotwordsSummary(); reportUnsavedState(); });
+hwEnabled.addEventListener('change', () => { updateHotwordsSummary(); reportUnsavedState(); });
 
 hwSave.addEventListener('click', async () => {
   hwSave.disabled = true;
@@ -175,6 +238,7 @@ hwSave.addEventListener('click', async () => {
     markAllTrialResultsForSettingsChange();
     syncAccuracyUI();
     updateHotwordsSummary();
+    reportUnsavedState();
     setTimeout(() => { hwStatus.textContent = ''; }, 2500);
   } catch (e) {
     hwStatus.textContent = `保存失敗: ${e.message}`;
@@ -198,10 +262,15 @@ hwSave.addEventListener('click', async () => {
       hotwordsScore: Number(hwScore.value),
       hotwordsEnabled: hwEnabled.checked,
     };
+    recognizerConfigLoaded = true;
     syncAccuracyUI();
     updateHotwordsSummary();
+    reportUnsavedState();
   } catch (_) { /* 起動直後は無視 */ }
 })();
+
+// 起動直後にも空の状態をMainへ渡し、前のウィンドウの状態を残さない。
+reportUnsavedState();
 
 // ---- ファイル投入 ----
 async function handleFiles(paths) {
@@ -474,6 +543,7 @@ async function startTranscriptionTrial(jobId) {
   };
   const trialId = ++trialSeq;
   job.activeTrialId = trialId;
+  reportUnsavedState();
   if (typeof job._refreshSetupFlow === 'function') job._refreshSetupFlow();
   job.trialErrorInfo = null;
   job.trialWarning = '';
@@ -513,6 +583,7 @@ async function startTranscriptionTrial(jobId) {
     if (job.trialTimer) clearInterval(job.trialTimer);
     job.trialTimer = null;
     if (String(job.activeTrialId) === String(trialId)) job.activeTrialId = null;
+    reportUnsavedState();
     el.querySelector('.trial-progress').classList.add('hidden');
     el.querySelector('.trial-btn').disabled = false;
     el.querySelector('.start-btn').disabled = false;
@@ -533,7 +604,15 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
   el.querySelector('.job-name').textContent = name || filePath.split(/[\\/]/).pop();
   el.querySelector('.job-status').textContent = '準備完了';
   jobsEl.prepend(el);
-  jobs.set(jobId, { el, filePath, result: null });
+  jobs.set(jobId, {
+    el,
+    filePath,
+    result: null,
+    resultRevision: 0,
+    savedResultRevision: 0,
+    recordingSaved: false,
+    isTranscribing: false,
+  });
   const job = jobs.get(jobId);
 
   const audioOriginal = el.querySelector('.audio-original');
@@ -633,6 +712,34 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
   const hasCompleteSettingChoice = () => !!selectedScenario
     && (selectedScenario !== 'custom' || !!selectedCustomPresetId);
 
+  function currentVadValues() {
+    return {
+      maxSpeechDuration: Number(vadMax.value),
+      minSilenceDuration: Number(vadSil.value),
+      minSpeechDuration: Number(vadMinSpeech.value),
+      threshold: Number(vadTh.value),
+      overlapAware: overlapAware.checked,
+      overlapSpeakers: Number(overlapSpeakers.value),
+    };
+  }
+
+  function hasUnsavedPresetDraft() {
+    const name = presetName.value.trim();
+    if (!name) return false;
+    const reference = presetSource.kind === 'custom'
+      ? customVadPresets.find((item) => item.id === presetSource.id)
+      : null;
+    if (!reference || reference.name !== name) return true;
+    const current = currentVadValues();
+    return current.maxSpeechDuration !== reference.maxSpeechDuration
+      || current.minSilenceDuration !== reference.minSilenceDuration
+      || current.minSpeechDuration !== reference.minSpeechDuration
+      || current.threshold !== reference.threshold
+      || current.overlapAware !== reference.overlapAware
+      || current.overlapSpeakers !== reference.overlapSpeakers;
+  }
+  job._hasUnsavedPreset = hasUnsavedPresetDraft;
+
   function syncScenarioUi() {
     vadSeg.forEach((button) => {
       const selected = !!selectedScenario && button.dataset.scenario === selectedScenario;
@@ -679,6 +786,7 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
     deletePresetBtn.disabled = true;
     vadPresetNote.textContent = SCENARIO_META[scenario] ? SCENARIO_META[scenario].summary : '';
     savePresetStatus.textContent = '';
+    reportUnsavedState();
   }
 
   function applySavedPreset(id, asCustomScenario = selectedScenario === 'custom') {
@@ -698,6 +806,7 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
     deletePresetBtn.disabled = false;
     vadPresetNote.textContent = '保存した詳細設定を適用しています';
     savePresetStatus.textContent = '';
+    reportUnsavedState();
   }
 
   function chooseCustomScenario(forceReset = false) {
@@ -715,6 +824,7 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
     deletePresetBtn.disabled = true;
     vadPresetNote.textContent = '';
     syncScenarioUi();
+    reportUnsavedState();
   }
 
   function syncVadLabels() {
@@ -742,6 +852,7 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
       && Number(overlapSpeakers.value) === p.overlapSpeakers;
     vadBadge.classList.toggle('hidden', same);
     refreshTrialFreshness(jobId);
+    reportUnsavedState();
   }
 
   function renderSavedPresets() {
@@ -791,6 +902,7 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
   savedSelect.addEventListener('change', () => {
     if (savedSelect.value) applySavedPreset(savedSelect.value);
   });
+  presetName.addEventListener('input', reportUnsavedState);
   [vadMax, vadSil, vadMinSpeech, vadTh].forEach((s) => s.addEventListener('input', markCustom));
   overlapAware.addEventListener('change', () => { syncOverlapUi(); markCustom(); });
   overlapSpeakers.addEventListener('change', markCustom);
@@ -1031,9 +1143,19 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
   });
   el.querySelector('.reassign-btn').addEventListener('click', () => doReassign(jobId));
   el.querySelectorAll('.toolbar button[data-fmt]').forEach((btn) => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       const job = jobs.get(jobId);
-      if (job.result) window.api.saveExport(exportPayload(job), btn.dataset.fmt);
+      if (!job.result) return;
+      const revision = job.resultRevision;
+      try {
+        const result = await window.api.saveExport(exportPayload(job), btn.dataset.fmt);
+        if (result && result.saved && job.resultRevision === revision) {
+          job.savedResultRevision = revision;
+          reportUnsavedState();
+        }
+      } catch (error) {
+        alert(`保存に失敗: ${error.message || error}`);
+      }
     });
   });
   el.querySelector('.copy-btn').addEventListener('click', () => {
@@ -1045,9 +1167,16 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
     const job = jobs.get(jobId);
     if (!job.result) return;
     const base = (job.result.name || 'recording').replace(/\.[^.]+$/, '');
-    try { await window.api.rtSaveWav(job.result.filePath, base); }
+    try {
+      const result = await window.api.rtSaveWav(job.result.filePath, base);
+      if (result && result.saved) {
+        job.recordingSaved = true;
+        reportUnsavedState();
+      }
+    }
     catch (e) { alert(`録音の保存に失敗: ${e.message}`); }
   });
+  el.querySelector('.merge-spk').addEventListener('change', () => markJobResultChanged(job));
   el.querySelector('.audio-result').addEventListener('error', () => {
     // Chromium が扱えない形式。区間再生はクリップ方式へ、全体再生は隠す。
     const job = jobs.get(jobId);
@@ -1096,6 +1225,8 @@ function startTranscribe(jobId, filePath, opts) {
   job.lastTranscribeOpts = opts;
   const el = job.el;
   resetResultUi(job);
+  job.isTranscribing = true;
+  reportUnsavedState();
   el.querySelector('.back-btn').classList.add('hidden');
   el.querySelector('.job-setup').classList.add('hidden');
   const status = el.querySelector('.job-status');
@@ -1374,7 +1505,10 @@ function onJobDone(jobId, result) {
   const job = jobs.get(jobId);
   if (!job) return;
   stopProgressTimer(job);
+  job.isTranscribing = false;
   job.result = result;
+  job.resultRevision = (job.resultRevision || 0) + 1;
+  job.savedResultRevision = 0;
   job.names = {};            // 話者ID -> 名前
   job.anchors = new Map();   // 区間index -> 手本として割り当てた話者ID
   job.maxSpeaker = -1;       // まだ話者なし
@@ -1397,6 +1531,7 @@ function onJobDone(jobId, result) {
   el.querySelector('.save-audio-btn').classList.toggle('hidden', !job.isRecording);
 
   renderResult(jobId);
+  reportUnsavedState();
 }
 
 // 結果欄の音源を Blob URL として読み込む。
@@ -1423,6 +1558,8 @@ async function enterTaggingMode(jobId) {
   const tagBtn = el.querySelector('.tag-btn');
   tagBtn.disabled = true;
   const ep = el.querySelector('.embed-progress');
+  job.isEmbedding = true;
+  reportUnsavedState();
   ep.classList.remove('hidden');
   ep.querySelector('.embed-eta').textContent = '';
   job.embedStartTime = Date.now();
@@ -1438,6 +1575,9 @@ async function enterTaggingMode(jobId) {
   } catch (e) {
     ep.querySelector('.embed-label').textContent = `声紋解析に失敗: ${e.message}`;
     tagBtn.disabled = false;
+  } finally {
+    job.isEmbedding = false;
+    reportUnsavedState();
   }
 }
 
@@ -1555,6 +1695,7 @@ function buildSpeakerSelect(jobId, idx, seg) {
     seg.speaker = id;
     if (id != null && id >= 0) job.anchors.set(idx, id); // 手で選んだら手本に
     else job.anchors.delete(idx);
+    markJobResultChanged(job);
     renderResult(jobId);
   });
   return sel;
@@ -1576,7 +1717,14 @@ function renderSpeakersBar(jobId) {
     const inp = document.createElement('input');
     inp.className = 'spk-name';
     inp.value = job.names[id] || `話者${id + 1}`;
-    inp.addEventListener('change', () => { job.names[id] = inp.value.trim() || `話者${id + 1}`; renderResult(jobId); });
+    inp.addEventListener('change', () => {
+      const next = inp.value.trim() || `話者${id + 1}`;
+      if ((job.names[id] || `話者${id + 1}`) !== next) {
+        job.names[id] = next;
+        markJobResultChanged(job);
+      }
+      renderResult(jobId);
+    });
     chip.appendChild(dot); chip.appendChild(inp);
     bar.appendChild(chip);
   }
@@ -1665,14 +1813,20 @@ async function doReassign(jobId) {
   const refs = {};
   for (const [idx, sid] of job.anchors) { (refs[sid] = refs[sid] || []).push(idx); }
   statusEl.textContent = '再識別中…';
+  job.isReassigning = true;
+  reportUnsavedState();
   try {
     const { labels, speakerCount } = await window.api.reassignSpeakers(jobId, refs);
     job.result.segments.forEach((s, i) => { if (labels[i] != null) s.speaker = labels[i]; });
     job.result.speakerCount = speakerCount;
+    markJobResultChanged(job);
     renderResult(jobId);
     statusEl.textContent = '再識別しました';
   } catch (e) {
     statusEl.textContent = `失敗: ${e.message}`;
+  } finally {
+    job.isReassigning = false;
+    reportUnsavedState();
   }
 }
 
@@ -1723,6 +1877,7 @@ function onJobError(jobId, err) {
   const job = jobs.get(jobId);
   if (!job) return;
   stopProgressTimer(job);
+  job.isTranscribing = false;
   job.el.querySelector('.progress-wrap').classList.add('hidden');
   const status = job.el.querySelector('.job-status');
   const msg = String(err.message || err);
@@ -1751,6 +1906,7 @@ function onJobError(jobId, err) {
   // 失敗・中止したら設定画面に戻し、条件を変えて再実行できるようにする
   job.el.querySelector('.job-setup').classList.remove('hidden');
   job.el.querySelector('.back-btn').classList.toggle('hidden', !job.result);
+  reportUnsavedState();
 }
 
 // ---- リアルタイム文字起こし（マイク） ----
@@ -1924,6 +2080,8 @@ function onJobError(jobId, err) {
       const src = ctx.createMediaStreamSource(stream);
       const node = new AudioWorkletNode(ctx, 'recorder', { numberOfInputs: 1, numberOfOutputs: 0 });
       cap = { stream, ctx, src, node, samples: 0, peak: 0, timer: 0 };
+      realtimeRecordingActive = true;
+      reportUnsavedState();
       node.port.onmessage = (e) => {
         if (!cap) return;
         const chunk = e.data;
@@ -2000,12 +2158,16 @@ function onJobError(jobId, err) {
     } catch (e) {
       statusEl.textContent = `停止に失敗: ${e.message}`;
     }
+    realtimeRecordingActive = false;
+    reportUnsavedState();
     setIdleUi();
   });
 
   // 設定変更・ワーカー落ちなどでセッションが main 側から止められた場合
   window.api.onRtError(async ({ message }) => {
     await cleanupCapture();
+    realtimeRecordingActive = false;
+    reportUnsavedState();
     statusEl.textContent = `リアルタイム文字起こしが中断されました: ${message}`;
     setIdleUi();
   });
@@ -2028,6 +2190,58 @@ function addRealtimeResultJob(r) {
     jobId,
   });
 }
+
+// ---- アプリ設定 ----
+(() => {
+  const modal = $('#settings-modal');
+  const openBtn = $('#settings-btn');
+  const confirmToggle = $('#confirm-unsaved-close');
+  const status = $('#settings-status');
+
+  async function loadPreferences() {
+    try {
+      const prefs = await window.api.getAppPreferences();
+      confirmToggle.checked = prefs.confirmOnCloseWithUnsaved !== false;
+      status.textContent = '';
+    } catch (error) {
+      status.textContent = `設定を読み込めませんでした: ${error.message || error}`;
+    }
+  }
+
+  async function openModal() {
+    modal.classList.remove('hidden');
+    await loadPreferences();
+    confirmToggle.focus();
+  }
+
+  function closeModal() {
+    modal.classList.add('hidden');
+    openBtn.focus();
+  }
+
+  confirmToggle.addEventListener('change', async () => {
+    const next = confirmToggle.checked;
+    confirmToggle.disabled = true;
+    status.textContent = '保存中…';
+    try {
+      const prefs = await window.api.setAppPreferences({ confirmOnCloseWithUnsaved: next });
+      confirmToggle.checked = prefs.confirmOnCloseWithUnsaved !== false;
+      status.textContent = '変更しました';
+    } catch (error) {
+      confirmToggle.checked = !next;
+      status.textContent = `保存できませんでした: ${error.message || error}`;
+    } finally {
+      confirmToggle.disabled = false;
+    }
+  });
+
+  openBtn.addEventListener('click', openModal);
+  modal.querySelectorAll('[data-settings-close]').forEach((node) => node.addEventListener('click', closeModal));
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !modal.classList.contains('hidden')) closeModal();
+  });
+  loadPreferences();
+})();
 
 // ---- このアプリについて / ライセンス（About モーダル） ----
 (() => {

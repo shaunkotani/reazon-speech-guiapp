@@ -23,8 +23,11 @@ body {
 header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 header h1 { margin: 0 0 4px; font-size: 22px; }
 header .sub { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
-.about-btn { background: #eef2ff; color: var(--accent); flex-shrink: 0; }
-.about-btn:hover { background: #e0e7ff; }
+.header-actions { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
+.header-action-btn { padding: 7px 11px; color: #475569; background: #f1f5f9; font-size: 12px; }
+.header-action-btn:hover { color: var(--text); background: #e2e8f0; }
+.about-btn { color: var(--accent); background: #eef2ff; }
+.about-btn:hover { color: var(--accent-hover); background: #e0e7ff; }
 
 /* モーダル（このアプリについて / ライセンス） */
 .modal { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; }
@@ -52,6 +55,27 @@ header .sub { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
 .about-repo-btn { padding: 6px 11px; font-size: 12px; }
 .about-privacy { margin: 0 0 14px; font-size: 12px; color: var(--ok); background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 8px 10px; }
 .modal-body h3 { font-size: 13px; margin: 12px 0 8px; }
+
+/* アプリ設定 */
+.settings-modal-card { width: min(590px, 92vw); }
+.settings-section h3 { margin-top: 0; font-size: 14px; }
+.settings-toggle-row {
+  padding: 13px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border: 1px solid #dbe2ea;
+  border-radius: 8px;
+  background: #f8fafc;
+  cursor: pointer;
+}
+.settings-toggle-row > span { display: grid; gap: 4px; }
+.settings-toggle-row strong { font-size: 13px; }
+.settings-toggle-row small { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.settings-toggle-row input { width: 19px; height: 19px; flex-shrink: 0; accent-color: var(--accent); }
+.settings-note { margin: 9px 2px 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.settings-status { display: block; min-height: 17px; margin: 6px 2px 0; color: var(--ok); font-size: 11px; }
 
 .oss-list { list-style: none; margin: 0 0 12px; padding: 0; }
 .oss-list li { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid #f0f1f3; flex-wrap: wrap; }
@@ -428,9 +452,6 @@ button:disabled { background: #9ca3af; cursor: default; }
   border: 1px solid var(--border); padding: 7px 12px; font-size: 12px;
 }
 .back-btn.ghost:hover { background: #f1f5f9; color: var(--text); }
-/* 別の設定で取り直す導線。書き出し系より前に置くので控えめな見た目にする */
-.redo-btn { background: #f1f5f9; color: var(--text); }
-.redo-btn:hover { background: #e2e8f0; }
 .denoised-row { background: #f0fdf4; border-radius: 6px; padding: 6px 8px; }
 
 /* 全体実行前の短区間テスト（独立モーダル） */
@@ -786,6 +807,45 @@ button:disabled { background: #9ca3af; cursor: default; }
   color: var(--muted);
   white-space: nowrap;
   cursor: pointer;
+}
+
+/* 再文字起こしは保存・話者操作と分離し、結果欄の末尾に独立して置く。 */
+.result-rework {
+  margin-top: 14px;
+  padding: 12px 0 2px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  border-top: 1px solid #e2e8f0;
+}
+.result-rework-copy {
+  min-width: 240px;
+  display: grid;
+  gap: 2px;
+}
+.result-rework-copy strong { color: #475569; font-size: 12px; }
+.result-rework-copy small { color: var(--muted); font-size: 10px; line-height: 1.45; }
+.redo-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 13px;
+  color: #9a3412;
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: none;
+}
+.redo-btn:hover { color: #7c2d12; background: #ffedd5; border-color: #fb923c; }
+.redo-icon { font-size: 16px; line-height: 1; }
+
+@media (max-width: 440px) {
+  .result-rework-copy { min-width: 0; width: 100%; }
+  .redo-btn { width: 100%; }
 }
 
 .segments { max-height: 360px; overflow-y: auto; }

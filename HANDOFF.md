@@ -82,6 +82,8 @@ src/
     厳密な区間分割、重なり検出、再認識候補生成、合意選択
   shared/transcriptionRange.js
     試し文字起こしの範囲正規化、前後文脈、対象区間選択、絶対時刻補正
+  shared/unsavedState.js
+    未保存状態・終了確認要否・ネイティブ確認ダイアログ文面の純JS判定
 
 scripts/
   test-pipeline.js             単一プロセスのCLI文字起こし
@@ -94,6 +96,7 @@ scripts/
   test-renderer-playback.js    renderer実駆動の画面回帰（認識はスタブ）
   test-transcription-range.js  試し文字起こしの範囲・境界・時刻補正の純JS回帰
   test-transcription-range-worker.js 実モデルの範囲デコード回帰（モデルがある環境向け）
+  test-unsaved-state.js        未保存状態・終了確認内容の純JS回帰
   test-media-seek.js           app-media再生の調査用ハーネス
   fetch-ffmpeg.js              Windows/Linux用LGPL FFmpegの取得
 
@@ -131,6 +134,8 @@ docs/         Microsoft Store計画、旧Azure署名手順
 - 失敗時はコード・発生工程・利用者向け説明・技術情報を分離し、再試行可能な場合は同じ設定で
   やり直せる。中止はエラー表示にしない。
 - 中止は実行中のネイティブ呼び出しを細粒度で止める方式ではなく、ワーカープールを終了して確実に止める。
+- 文字起こし結果、リアルタイム録音、用語辞書、名前付きカスタム設定の未保存状態を renderer が集約し、main へ件数だけ通知する。結果はTXT/SRT/VTT/JSONのいずれかの保存成功で保存済みになり、コピーだけでは解除しない。保存後に話者名・タグ・まとめ設定を変えた場合は再び未保存になる。
+- ウィンドウ終了時に未保存内容があればネイティブ確認ダイアログを表示する。「次回から確認しない」は `settings.json` の `confirmOnCloseWithUnsaved` に保存し、右上の「設定」モーダルから再度有効にできる。処理中・録音中は設定にかかわらず確認する。
 
 ### 4.2 認識設定
 
@@ -243,6 +248,7 @@ docs/         Microsoft Store計画、旧Azure署名手順
 - 自動更新はパッケージ済みアプリだけ有効。起動1.5秒後に確認し、更新ありならバナー表示、ユーザー操作でダウンロード、再起動して適用する。
 - `autoDownload = false` / `autoInstallOnAppQuit = true`。
 - About からGitHubリポジトリを開き、手動更新確認、データ容量確認、データ初期化、完全アンインストールを実行できる。
+- 右上の「設定」から終了時の未保存確認を切り替えられる。変更は即時保存し、設定画面自体に保存ボタンは置かない。
 - データ初期化前はワーカーを止め、ONNX ファイルロックを解放する。
 - 完全アンインストールは Windows の NSIS インストール時だけ有効。`Uninstall *.exe` が無い dev / zip / macOS / AppX ではボタンを無効化する。
 
@@ -254,7 +260,7 @@ docs/         Microsoft Store計画、旧Azure署名手順
 |---|---|
 | `userData/models/` | 初回取得した全モデル |
 | `userData/hotwords.txt` | 1行1語の用語辞書 |
-| `userData/settings.json` | 辞書ON/OFF・score、高精度モード、VADプリセット |
+| `userData/settings.json` | 辞書ON/OFF・score、高精度モード、VADプリセット、終了確認設定 |
 | `os.tmpdir()/reazonspeech-preview/` | preview WAV、clip WAV、共有PCM、リアルタイム録音WAV。終了時・初期化時に削除 |
 
 必須モデル:
