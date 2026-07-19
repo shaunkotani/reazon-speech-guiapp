@@ -76,6 +76,11 @@ const VAD_PRESETS = {
     overlapAware: true, overlapSpeakers: 2,
     note: '同時発話を再解析し、3秒単位で細かく認識する設定（処理時間は長め）',
   },
+  interview: {
+    maxSpeechDuration: 3, minSilenceDuration: 0.1, minSpeechDuration: 0.15, threshold: 0.2,
+    overlapAware: true, overlapSpeakers: 2,
+    note: '小さな声や短い応答を拾いながら、重なり音声を3秒単位で再解析する設定（処理時間は長め）',
+  },
   lecture: {
     maxSpeechDuration: 8, minSilenceDuration: 0.35, minSpeechDuration: 0.15, threshold: 0.45,
     overlapAware: false, overlapSpeakers: 2,
@@ -1033,12 +1038,13 @@ function onJobError(jobId, err) {
   modeLocalBtn.addEventListener('click', () => setMode('local'));
   modeRealtimeBtn.addEventListener('click', () => setMode('realtime'));
 
-  // 話し方プリセット（組み込み3種 + 保存済みカスタム）。値は VAD_PRESETS を流用する。
+  // 話し方プリセット（組み込み4種 + 保存済みカスタム）。値は VAD_PRESETS を流用する。
   function renderVadChoices() {
     const cur = vadSel.value || 'standard';
     vadSel.replaceChildren(
       new Option('標準', 'standard'),
       new Option('会話・電話', 'conversation'),
+      new Option('インタビュー', 'interview'),
       new Option('講演・朗読', 'lecture'),
     );
     customVadPresets.forEach((p) => vadSel.add(new Option(p.name, `custom:${p.id}`)));

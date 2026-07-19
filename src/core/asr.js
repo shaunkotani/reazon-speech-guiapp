@@ -304,10 +304,12 @@ const DEFAULT_VAD = {
 };
 
 // 用途別プリセット。samples/ の会話・独話音声を、認識結果まで通して比較した値。
-// conversation は重なりのある会話を積極的に分割し、lecture は語中分割を抑える。
+// conversation / interview は重なりのある会話を積極的に分割し、
+// lecture は語中分割を抑える。
 const VAD_PRESETS = {
   standard:     { threshold: 0.5,  minSilenceDuration: 0.2,  minSpeechDuration: 0.15, maxSpeechDuration: 6 },
   conversation: { threshold: 0.7,  minSilenceDuration: 0.1,  minSpeechDuration: 0.2,  maxSpeechDuration: 3 },
+  interview:    { threshold: 0.2,  minSilenceDuration: 0.1,  minSpeechDuration: 0.15, maxSpeechDuration: 3 },
   lecture:      { threshold: 0.45, minSilenceDuration: 0.35, minSpeechDuration: 0.15, maxSpeechDuration: 8 },
 };
 

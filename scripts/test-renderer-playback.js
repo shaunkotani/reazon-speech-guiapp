@@ -73,6 +73,9 @@ async function main() {
     && !document.querySelector('#realtime').classList.contains('hidden')
     && !document.querySelector('#rt-start').disabled;`),
     'リアルタイムモードで録音パネルが表示され、録音開始が押せる');
+  check(await run(`return [...document.querySelector('#rt-vad').options]
+    .some((o) => o.value === 'interview' && o.textContent === 'インタビュー');`),
+    'リアルタイムの話し方にもインタビュープリセットが表示される');
   await run(`document.querySelector('#mode-local').click()`);
   check(await run(`return !document.querySelector('#dropzone').classList.contains('hidden')
     && document.querySelector('#realtime').classList.contains('hidden');`),
@@ -125,12 +128,23 @@ async function main() {
       && j.querySelector('.vad-sil').value === '0.1'
       && j.querySelector('.vad-min-speech').value === '0.2';`),
     '会話・電話プリセットへ指定値が入り、重なり再解析がON');
+  await run(`document.querySelector('.job [data-preset="interview"]').click()`);
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.overlap-aware').checked && !j.querySelector('.overlap-speakers').disabled
+      && j.querySelector('.overlap-speakers').value === '2'
+      && j.querySelector('.vad-max').value === '3'
+      && j.querySelector('.vad-sil').value === '0.1'
+      && j.querySelector('.vad-min-speech').value === '0.15'
+      && j.querySelector('.vad-th').value === '0.2';`),
+    'インタビュープリセットへ指定値が入り、重なり再解析がON');
   await run(`document.querySelector('.job .start-btn').click()`);
   await waitFor(`document.querySelectorAll('.job .seg-play').length === 3`, '文字起こし結果が描画される');
   check(lastTranscribeOpts && lastTranscribeOpts.denoiseStrength === 0,
     '文字起こしへノイズ除去「なし」が渡される');
-  check(lastTranscribeOpts && lastTranscribeOpts.vad.minSpeechDuration === 0.2,
-    '文字起こしへ短い発話の最小長が渡される');
+  check(lastTranscribeOpts && lastTranscribeOpts.vad.preset === 'interview'
+      && lastTranscribeOpts.vad.minSpeechDuration === 0.15
+      && lastTranscribeOpts.vad.threshold === 0.2,
+    '文字起こしへインタビュープリセットの値が渡される');
 
   check(await run(`return !document.querySelector('.job .job-result').classList.contains('hidden')`),
     '文字起こし後に結果欄が表示される');
