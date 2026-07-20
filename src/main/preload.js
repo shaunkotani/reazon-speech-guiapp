@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('api', {
   transcribe: (filePath, jobId, opts) =>
     ipcRenderer.invoke('transcribe:file', filePath, jobId, opts),
   cancelTranscribe: (jobId) => ipcRenderer.invoke('transcribe:cancel', jobId),
+  skipTranscribeOverlap: (jobId) => ipcRenderer.invoke('transcribe:skip-overlap', jobId),
   onTranscribeStatus: (cb) => ipcRenderer.on('transcribe:status', (_e, p) => cb(p)),
   onTranscribeProgress: (cb) => ipcRenderer.on('transcribe:progress', (_e, p) => cb(p)),
   // 設定確認用の短区間文字起こし。本結果とは別に扱い、同じ認識パイプラインを使う。
@@ -49,6 +50,16 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.invoke('transcribe:trial-cancel', jobId, trialId),
   onTranscribeTrialStatus: (cb) =>
     ipcRenderer.on('transcribe:trial-status', (_e, p) => cb(p)),
+  // 話者付きの短い手本から VAD・ノイズ除去設定を自動探索する。
+  autoTune: (filePath, jobId, tuneId, opts) =>
+    ipcRenderer.invoke('transcribe:auto-tune', filePath, jobId, tuneId, opts),
+  cancelAutoTune: (jobId, tuneId) =>
+    ipcRenderer.invoke('transcribe:auto-tune-cancel', jobId, tuneId),
+  onAutoTuneStatus: (cb) =>
+    ipcRenderer.on('transcribe:auto-tune-status', (_e, p) => cb(p)),
+  // 選択した発話を、境界を少し変えながら再認識して候補を返す。
+  segmentCandidates: (filePath, request) =>
+    ipcRenderer.invoke('transcribe:segment-candidates', filePath, request),
   // 話者タグ付け用に全区間の声紋を遅延計算 -> { ok, count }
   computeEmbeddings: (jobId, filePath, denoiseStrength, segments) =>
     ipcRenderer.invoke('embeddings:compute', jobId, filePath, denoiseStrength, segments),

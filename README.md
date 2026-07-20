@@ -12,6 +12,7 @@
 - **ノイズ除去**（GTCRN）: 既定は「なし」。弱/中/強を選び、**除去後のプレビュー再生**も可能
 - VAD で発話区間に分割し、区間ごとのタイムスタンプを付与。用途別プリセットに加え、調整した設定を名前付きで保存可能
 - 音声のシチュエーションを選び、全体実行前に任意の開始位置から30秒・60秒・120秒だけ**仕上がりをテスト**可能
+- **文字起こしを修正して精度を上げる**: シチュエーション別の仕上がりテスト後に、波形付きの話者別タイムラインで発話を修正すると、現在設定を基準にVAD・GTCRN・重なり再解析を自動比較。発話ブロックは移動・左右リサイズでき、開始/終了秒の直接入力、境界違いの再認識候補、欠落発話の追加、話者レイヤーでの重なり表現に対応する。「確定」した発話だけを採点と固定修正に使い、未確定部分は以後の再テスト・全体文字起こしで更新できる
 - **重なり音声の再解析**: pyannote で同時発話を検出し、問題区間だけ話者境界と複数の時間窓で再認識
 - **高精度モード**: beam search 復号で認識精度を底上げ（処理速度はやや低下）。辞書とは独立に ON/OFF 可能
 - **用語辞書（ホットワード）**: 固有名詞・専門用語を登録すると優先認識（内部で高精度モードを自動有効化）
@@ -43,6 +44,8 @@ src/
   renderer/            UI（HTML/CSS/JS）
   shared/export.js     TXT/SRT/VTT/JSON 整形
   shared/overlap.js    重なり区間の候補生成・合意選択・統合
+  shared/autoTune.js   修正文の正規化・文字誤り評価・自動調整候補の生成
+  shared/corrections.js 確定修正の時刻補間・重複範囲更新・認識結果への反映
   shared/unsavedState.js 終了時の未保存状態・確認内容の共通判定
 scripts/test-pipeline.js  CLI 動作確認
 ```
@@ -58,8 +61,12 @@ npm run test:overlap                    # 重なり補正の純JS回帰テスト
 npm run test:progress                   # 工程・ETA・エラー分類の純JS回帰テスト
 npm run test:queue                      # 複数ファイル待機キューの純JS回帰テスト
 npm run test:range                      # 試し文字起こしの範囲・時刻補正テスト
+npm run test:auto-tune                  # 修正文による自動調整の採点・候補選択テスト
+npm run test:corrections                # 確定修正の保持・時刻補間・結果置換テスト
 npm run test:unsaved                    # 未保存状態・終了確認内容の純JS回帰テスト
 npm run test:range-worker               # 実モデルで短区間デコードを確認（モデルがある開発環境向け）
+npm run test:auto-tune-worker           # 実モデルで自動調整用PCM/VAD候補生成を確認
+npm run test:auto-tune-e2e              # 実モデル・実画面で修正確定から全体再認識まで通し確認
 npm run test:renderer                   # プリセット保存・音声再生の画面回帰テスト
 ```
 

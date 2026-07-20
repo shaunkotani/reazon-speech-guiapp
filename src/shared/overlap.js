@@ -94,7 +94,22 @@ function intersectsAny(seg, intervals) {
 function buildRecognitionItems(vadSegments, speakerSegments, opts = {}) {
   const cfg = { ...DEFAULTS, ...opts };
   const base = splitStrictSegments(vadSegments, cfg.maxDuration, cfg.strictOverlap);
-  const overlaps = cfg.enabled ? detectOverlapIntervals(speakerSegments, cfg.minDetectedOverlap) : [];
+  const detected = cfg.enabled ? detectOverlapIntervals(speakerSegments, cfg.minDetectedOverlap) : [];
+  const supplied = cfg.enabled && Array.isArray(cfg.manualOverlapIntervals)
+    ? cfg.manualOverlapIntervals.filter((interval) => interval
+      && Number(interval.end) - Number(interval.start) >= cfg.minDetectedOverlap)
+      .map((interval) => ({ start: Number(interval.start), end: Number(interval.end) }))
+    : [];
+  const overlaps = detected.concat(supplied).sort((a, b) => a.start - b.start || a.end - b.end)
+    .reduce((merged, interval) => {
+      const previous = merged[merged.length - 1];
+      if (previous && interval.start <= previous.end + 0.02) previous.end = Math.max(previous.end, interval.end);
+      else merged.push({ ...interval });
+      return merged;
+    }, []);
+  const allSpeakerSegments = speakerSegments.concat(
+    Array.isArray(cfg.manualSpeakerSegments) ? cfg.manualSpeakerSegments : [],
+  );
   const items = [];
   let repairSeq = 0;
   let overlapGroupCount = 0;
@@ -107,7 +122,7 @@ function buildRecognitionItems(vadSegments, speakerSegments, opts = {}) {
     const groupOverlaps = overlaps.filter((it) => intervalIntersection(seg, it));
     if (!groupOverlaps.length) return;
 
-    const tracks = speakerSegments.filter((track) =>
+    const tracks = allSpeakerSegments.filter((track) =>
       intersectsAny(track, groupOverlaps) && intervalIntersection(seg, track));
     const seen = new Set();
     let repairsForGroup = 0;

@@ -60,12 +60,42 @@
     return { phaseStartedAt: 0, smoothedRemaining: null };
   }
 
+  function etaProgress(status) {
+    const workDone = Number(status.completedWorkSec);
+    const workTotal = Number(status.totalWorkSec);
+    if (Number.isFinite(workTotal) && workTotal > 0
+      && Number.isFinite(workDone) && workDone > 0) {
+      return { done: Math.max(0, workDone), total: workTotal };
+    }
+
+    // 古いワーカーや一部の進捗通知には処理済み音声秒数が含まれないため、
+    // 区間数、最後に比率の順でフォールバックする。
+    const completed = Number(status.completed);
+    const total = Number(status.total);
+    if (Number.isFinite(total) && total > 0
+      && Number.isFinite(completed) && completed > 0) {
+      return { done: Math.max(0, completed), total };
+    }
+    const ratio = Number(status.ratio);
+    if (Number.isFinite(ratio) && ratio > 0) {
+      return { done: Math.min(1, ratio), total: 1 };
+    }
+    return { done: 0, total: Math.max(0, workTotal) || Math.max(0, total) || 0 };
+  }
+
   // 認識区間の「件数」ではなく、完了した音声秒数を使う。表示開始を遅らせ、
   // 残り秒数を平滑化することで、並列ワーカー由来の急な上下を抑える。
   function updateEta(state, status, now = Date.now()) {
     if (!state || !status) return '';
     if (status.phase === 'queued') return '開始後に残り時間を計算';
     if (status.phase === 'finalizing') return 'まもなく完了';
+    if (status.phase === 'overlap') {
+      state.phaseStartedAt = 0;
+      state.smoothedRemaining = null;
+      return status.skippingOverlap
+        ? '通常の文字起こしへ切り替え中'
+        : '時間がかかります';
+    }
     if (status.phase !== 'recognizing') {
       state.phaseStartedAt = 0;
       state.smoothedRemaining = null;
@@ -73,10 +103,9 @@
     }
 
     if (!state.phaseStartedAt) state.phaseStartedAt = now;
-    const done = Math.max(0, Number(status.completedWorkSec) || 0);
-    const total = Math.max(0, Number(status.totalWorkSec) || 0);
+    const { done, total } = etaProgress(status);
     const elapsed = Math.max(0, (now - state.phaseStartedAt) / 1000);
-    if (total <= 0 || done <= 0 || elapsed < 3 || done / total < 0.04) {
+    if (total <= 0 || done <= 0 || elapsed < 1) {
       return '残り時間を計算中';
     }
     if (done >= total) return 'まもなく完了';

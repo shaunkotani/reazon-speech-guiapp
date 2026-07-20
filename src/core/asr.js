@@ -163,13 +163,20 @@ function denoisePcm(denoiser, samples, strength) {
   const a = Math.min(1, strength);
   // enableExternalBuffer=false: Electron では外部バッファ不可
   const out = denoiser.run({ samples, sampleRate: SAMPLE_RATE, enableExternalBuffer: false });
-  const den = out.samples;
-  if (a >= 1) return den;
+  return blendPcm(samples, out.samples, a);
+}
+
+// 同じ短区間を複数強度で比較する自動調整用。GTCRN 推論は1回だけ行い、
+// 原音と完全除去音のブレンド比だけを変えられるように分離している。
+function blendPcm(samples, enhanced, strength) {
+  const a = Math.min(1, Math.max(0, Number(strength) || 0));
+  if (a <= 0) return samples;
+  if (a >= 1) return enhanced;
   // 長さ差に備えて短い方に合わせてブレンド
-  const n = Math.min(den.length, samples.length);
+  const n = Math.min(enhanced.length, samples.length);
   const mixed = new Float32Array(n);
   for (let i = 0; i < n; i++) {
-    mixed[i] = (1 - a) * samples[i] + a * den[i];
+    mixed[i] = (1 - a) * samples[i] + a * enhanced[i];
   }
   return mixed;
 }
@@ -528,6 +535,7 @@ module.exports = {
   createRecognizer,
   createVad,
   createDenoiser,
+  blendPcm,
   createEmbeddingExtractor,
   createSpeakerDiarizer,
   extractEmbedding,

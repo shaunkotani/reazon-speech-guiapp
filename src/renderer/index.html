@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <!-- media-src: app-media はクリップ再生用、blob は結果プレイヤー（IPC で読んで Blob 化）用 -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' app-media: blob:;" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' app-media: blob:; connect-src 'self' blob:;" />
   <title>モコシ</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -346,13 +346,159 @@
                   </div>
                   <p class="trial-stale hidden">試行後に設定が変更されています。全体を実行する前に、もう一度試すことをおすすめします。</p>
                   <p class="trial-settings"></p>
+                  <p class="trial-correction-note hidden"></p>
                   <div class="trial-segments"></div>
+                  <section class="auto-reference hidden" aria-label="文字起こしを修正して精度を上げる">
+                    <div class="auto-reference-head">
+                      <div>
+                        <strong>タイムラインで正しい発話を確定してください</strong>
+                        <p>ブロックを選び、本文・話者・開始と終了を直します。確定した発話だけを精度調整に使い、再文字起こし後も保持します。重なった発話は別の話者レイヤーへ置けます。</p>
+                      </div>
+                      <span class="auto-reference-count"></span>
+                    </div>
+                    <div class="auto-speaker-names"></div>
+                    <div class="auto-timeline-toolbar">
+                      <div class="auto-timeline-transport" aria-label="タイムラインの再生操作">
+                        <button type="button" class="auto-timeline-play-toggle" aria-keyshortcuts="Space">▶ 再生</button>
+                        <button type="button" class="auto-timeline-stop" aria-keyshortcuts="S">■ 停止</button>
+                        <span class="auto-timeline-play-time">00:00 / 00:00</span>
+                      </div>
+                      <div class="auto-timeline-zoom" aria-label="タイムラインの拡大率">
+                        <button type="button" class="auto-zoom-out" title="縮小">−</button>
+                        <span class="auto-zoom-label">標準</span>
+                        <button type="button" class="auto-zoom-in" title="拡大">＋</button>
+                      </div>
+                      <button type="button" class="auto-confirm-all">表示中の発話をすべて確定</button>
+                      <button type="button" class="auto-add-row">＋ 欠落発話を追加</button>
+                      <span class="auto-timeline-help">ブロックを移動、左右端をドラッグして区間を調整</span>
+                    </div>
+                    <p class="auto-timeline-shortcuts">Space: 再生/一時停止　←/→: 1秒移動　Shift＋←/→: 5秒移動　Home: 先頭　S: 停止　J/K/L: 戻る/一時停止/進む</p>
+                    <div class="auto-timeline-scroll" tabindex="0" aria-label="発話修正タイムライン" aria-keyshortcuts="ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight Home J K L">
+                      <div class="auto-timeline-content">
+                        <canvas class="auto-timeline-waveform" aria-hidden="true"></canvas>
+                        <div class="auto-timeline-ruler" aria-hidden="true"></div>
+                        <div class="auto-timeline-lanes"></div>
+                        <div class="auto-timeline-playhead" aria-hidden="true"></div>
+                      </div>
+                    </div>
+                    <section class="auto-block-inspector hidden" aria-label="選択した発話の編集">
+                      <div class="auto-inspector-head">
+                        <div>
+                          <strong class="auto-inspector-title">発話を編集</strong>
+                          <span class="auto-inspector-kind"></span>
+                        </div>
+                        <button type="button" class="auto-inspector-play">▶ この区間を再生</button>
+                      </div>
+                      <div class="auto-inspector-grid">
+                        <label>話者<select class="auto-inspector-speaker"></select></label>
+                        <label>開始（秒）<input class="auto-inspector-start" type="number" min="0" step="0.05" /></label>
+                        <label>終了（秒）<input class="auto-inspector-end" type="number" min="0" step="0.05" /></label>
+                        <label class="auto-confirm-label"><input class="auto-inspector-confirmed" type="checkbox" /> 確定（再文字起こしでも保持）</label>
+                      </div>
+                      <label class="auto-inspector-text-label">正しい文章
+                        <textarea class="auto-inspector-text" rows="3" placeholder="この発話の正しい内容"></textarea>
+                      </label>
+                      <div class="auto-candidate-panel">
+                        <div class="auto-candidate-head">
+                          <strong>認識候補</strong>
+                          <button type="button" class="auto-candidate-generate">境界を変えて候補を生成</button>
+                          <span class="auto-candidate-status"></span>
+                        </div>
+                        <div class="auto-candidate-list"></div>
+                      </div>
+                      <div class="auto-inspector-actions">
+                        <button type="button" class="auto-insert-before">この前に追加</button>
+                        <button type="button" class="auto-insert-after">この後に追加</button>
+                        <button type="button" class="auto-row-remove">この発話を削除</button>
+                      </div>
+                    </section>
+                    <div class="auto-reference-tools">
+                      <span class="auto-reference-error" role="alert"></span>
+                      <button type="button" class="auto-edit-cancel">修正をやめる</button>
+                      <button type="button" class="auto-tune-btn">確定した発話で精度を上げる</button>
+                    </div>
+                  </section>
+                  <section class="auto-tune-result hidden" aria-live="polite">
+                    <div class="auto-tune-result-head">
+                      <strong>精度向上の調整が完了しました</strong>
+                      <span class="auto-tune-score"></span>
+                    </div>
+                    <p class="auto-tune-summary"></p>
+                    <p class="auto-tune-settings"></p>
+                    <p class="auto-correction-confirmed"></p>
+                    <p class="auto-tune-warning hidden"></p>
+                  </section>
                   <div class="trial-result-actions">
                     <span>この仕上がりで進みますか？</span>
-                    <button type="button" class="trial-adjust-btn">設定を調整する</button>
+                    <button type="button" class="trial-adjust-btn">発話の拾い方などを調整</button>
+                    <button type="button" class="trial-complete-start-btn hidden">この設定で全体を文字起こし</button>
                     <button type="button" class="trial-use-btn">この設定で進む</button>
                   </div>
+                  <details class="trial-more-actions">
+                    <summary>その他の操作</summary>
+                    <div>
+                      <button type="button" class="trial-auto-btn">文字起こしを修正して精度を上げる</button>
+                      <button type="button" class="trial-edit-again-btn hidden">もう一度文字起こしを修正</button>
+                      <button type="button" class="trial-unlock-btn hidden">この範囲の修正を解除</button>
+                    </div>
+                  </details>
                 </div>
+                <section class="trial-adjust-view hidden" aria-label="発話の拾い方などを調整">
+                  <div class="trial-adjust-context">
+                    <div>
+                      <strong>前回と同じ範囲で、設定の違いを比べられます</strong>
+                      <span class="trial-adjust-range"></span>
+                      <p class="trial-adjust-before-settings"></p>
+                    </div>
+                    <div class="trial-adjust-audio-host"></div>
+                  </div>
+                  <div class="trial-adjust-guide">
+                    <strong>気になる点に関係する項目</strong>
+                    <div class="trial-adjust-guide-grid">
+                      <div><b>発話が抜ける</b><span>最小長を短くするか、判定を緩めます</span></div>
+                      <div><b>文が細かく切れる</b><span>区切る無音や最大長を長くします</span></div>
+                      <div><b>声が重なる</b><span>重なり音声の再解析を有効にします</span></div>
+                    </div>
+                  </div>
+                  <div class="trial-adjust-settings-host"></div>
+                  <div class="trial-adjust-actions">
+                    <span>再テストを開始するまで、変更は確定されません。</span>
+                    <button type="button" class="trial-adjust-back-btn">テスト結果に戻る</button>
+                    <button type="button" class="trial-adjust-retest-btn">この設定でもう一度テスト</button>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+          <div class="auto-tune-overlay hidden" role="dialog" aria-modal="true" aria-label="文字起こし精度を調整中">
+            <div class="auto-tune-overlay-card" tabindex="-1">
+              <div class="auto-tune-overlay-spinner" aria-hidden="true"></div>
+              <p class="auto-tune-overlay-kicker">文字起こし精度を向上中</p>
+              <h2 class="auto-tune-overlay-title">修正内容に近づく認識設定を探しています</h2>
+              <p class="auto-tune-overlay-note">修正した文章は正しい内容として確定され、この処理でも書き換えられません。</p>
+              <div class="auto-tune-overlay-progress" role="status" aria-live="polite" aria-atomic="true">
+                <div class="auto-tune-overlay-progress-top">
+                  <span class="auto-tune-overlay-label">認識設定の調整を準備中…</span>
+                  <span class="auto-tune-overlay-count"></span>
+                </div>
+                <div class="progress"><div class="bar is-indeterminate"></div></div>
+                <span class="auto-tune-overlay-elapsed">経過 00:00</span>
+              </div>
+              <details class="auto-tune-overlay-details">
+                <summary>処理の詳細</summary>
+                <p class="auto-tune-overlay-detail">音声の強調や発話の区切り方を複数試し、修正内容に最も近い候補を比較します。</p>
+              </details>
+              <div class="auto-tune-overlay-error hidden" role="alert">
+                <strong>精度を上げる処理を完了できませんでした</strong>
+                <p class="auto-tune-overlay-error-message"></p>
+                <details class="auto-tune-overlay-error-details hidden">
+                  <summary>エラーの詳細</summary>
+                  <p class="auto-tune-overlay-error-technical"></p>
+                </details>
+              </div>
+              <div class="auto-tune-overlay-actions">
+                <button type="button" class="auto-tune-overlay-cancel">中止</button>
+                <button type="button" class="auto-tune-overlay-return hidden">修正画面に戻る</button>
               </div>
             </div>
           </div>
@@ -373,6 +519,7 @@
           <span class="eta">残り時間を計算中</span>
           <span class="elapsed">経過 00:00</span>
           <span class="progress-spacer"></span>
+          <button type="button" class="skip-overlap-btn hidden">重なり解析をスキップ</button>
           <button class="cancel-btn">中止</button>
         </div>
         <p class="progress-warning hidden"></p>
@@ -523,6 +670,8 @@
 
   <script src="../shared/transcriptionProgress.js"></script>
   <script src="../shared/unsavedState.js"></script>
+  <script src="../shared/autoTune.js"></script>
+  <script src="../shared/corrections.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

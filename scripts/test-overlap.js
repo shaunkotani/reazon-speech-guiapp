@@ -44,6 +44,24 @@ function testCandidatePlanning() {
   );
   assert.strictEqual(harmless.overlapGroupCount, 0);
   assert.strictEqual(harmless.items.length, 1);
+
+  const manualTracks = [
+    { start: 0, end: 2.5, speaker: 'manual:a' },
+    { start: 1.5, end: 4, speaker: 'manual:b' },
+  ];
+  const manual = overlap.buildRecognitionItems(
+    [{ start: 0, end: 4 }],
+    [],
+    {
+      enabled: true,
+      maxDuration: 6,
+      manualOverlapIntervals: overlap.detectOverlapIntervals(manualTracks),
+      manualSpeakerSegments: manualTracks,
+    },
+  );
+  assert.strictEqual(manual.overlapGroupCount, 1,
+    'ユーザー指定の重なり区間は自動検出が空でも再認識候補を作る');
+  assert(manual.items.some((item) => item.kind === 'repair' && item.speakerHint === 'manual:b'));
 }
 
 function testConsensusAndFinalize() {

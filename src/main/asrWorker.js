@@ -89,6 +89,142 @@ function rtEnqueue(seg) {
 
 // ---- 各オペレーション ----
 const OPS = {
+  // タイムラインで選択した発話について、境界を少しずつ変えた再認識候補を返す。
+  // モデル自体の N-best ではなく、語頭・語尾の切れ方による候補を生成する。
+  async segmentCandidates({ filePath, start, end, denoiseStrength = 0 }) {
+    const requestedStart = Math.max(0, Number(start) || 0);
+    const requestedEnd = Math.max(requestedStart + 0.1, Number(end) || requestedStart + 0.1);
+    const margin = 0.3;
+    const decodeStart = Math.max(0, requestedStart - margin);
+    const decodeEnd = requestedEnd + margin;
+    let samples = await core.decodeToPcm(filePath, {
+      startSeconds: decodeStart,
+      maxSeconds: decodeEnd - decodeStart,
+    });
+    const strength = Math.max(0, Math.min(1, Number(denoiseStrength) || 0));
+    if (strength > 0 && ctx.denoiser) {
+      const enhanced = core.denoisePcm(ctx.denoiser, samples, 1);
+      samples = core.blendPcm(samples, enhanced, strength);
+    }
+
+    const variants = [
+      { label: '指定した区間', start: requestedStart, end: requestedEnd },
+      { label: '語頭を0.2秒広げる', start: requestedStart - 0.2, end: requestedEnd },
+      { label: '語尾を0.2秒広げる', start: requestedStart, end: requestedEnd + 0.2 },
+      { label: '前後を0.2秒広げる', start: requestedStart - 0.2, end: requestedEnd + 0.2 },
+      { label: '前後を0.1秒狭める', start: requestedStart + 0.1, end: requestedEnd - 0.1 },
+    ];
+    const seenRanges = new Set();
+    const out = [];
+    for (const variant of variants) {
+      const variantStart = Math.max(decodeStart, variant.start);
+      const variantEnd = Math.min(decodeStart + samples.length / core.SAMPLE_RATE, variant.end);
+      if (variantEnd - variantStart < 0.1) continue;
+      const key = `${variantStart.toFixed(3)}:${variantEnd.toFixed(3)}`;
+      if (seenRanges.has(key)) continue;
+      seenRanges.add(key);
+      const a = Math.max(0, Math.round((variantStart - decodeStart) * core.SAMPLE_RATE));
+      const b = Math.min(samples.length, Math.round((variantEnd - decodeStart) * core.SAMPLE_RATE));
+      const result = await core.recognizeSegment(ctx.recognizer, samples.subarray(a, b));
+      const text = String(result.text || '').trim();
+      if (text) out.push({ label: variant.label, start: variantStart, end: variantEnd, text });
+    }
+    return out;
+  },
+
+  // 文字起こし修正による自動調整用。指定範囲は一度だけデコードし、GTCRN も完全除去を一度だけ
+  // 実行する。候補ごとの VAD 境界と、強度別の共有 PCM をまとめて返す。
+  async prepareAutoTune({ filePath, range, candidates, pcmVariants, speakerCount }, emit) {
+    emit({ kind: 'phase', phase: 'decoding' });
+    const decodeWindow = rangeTools.buildDecodeWindow(range || {});
+    const rawSamples = await core.decodeToPcm(filePath, {
+      startSeconds: decodeWindow.decodeStartSeconds,
+      maxSeconds: decodeWindow.decodeDurationSeconds,
+    });
+    const totalAudioSec = rawSamples.length / core.SAMPLE_RATE;
+    const actualDurationSeconds = Math.max(0, Math.min(
+      decodeWindow.durationSeconds,
+      totalAudioSec - decodeWindow.selectionStartSeconds,
+    ));
+    if (actualDurationSeconds < 0.05) {
+      throw new Error('指定した調整区間に音声がありません。開始位置を音声の長さ以内にしてください。');
+    }
+
+    let speakerSegments = [];
+    let speakerError = '';
+    if (Number(speakerCount) >= 2) {
+      emit({ kind: 'phase', phase: 'overlap', totalAudioSec });
+      try {
+        const diarizer = diarizerFor(Number(speakerCount));
+        if (diarizer) {
+          speakerSegments = diarizer.process(rawSamples).map((segment) => ({
+            start: segment.start, end: segment.end, speaker: segment.speaker,
+          }));
+        } else speakerError = '話者解析モデルが見つかりません';
+      } catch (error) {
+        speakerError = error.message || String(error);
+      }
+    }
+
+    const variants = Array.isArray(pcmVariants) ? pcmVariants : [];
+    const strengths = variants.map((variant) => Number(variant.strength) || 0);
+    let enhanced = null;
+    if (strengths.some((strength) => strength > 0) && ctx.denoiser) {
+      emit({ kind: 'phase', phase: 'denoising', totalAudioSec });
+      enhanced = core.denoisePcm(ctx.denoiser, rawSamples, 1);
+    }
+    for (const variant of variants) {
+      const strength = Number(variant.strength) || 0;
+      const samples = enhanced ? core.blendPcm(rawSamples, enhanced, strength) : rawSamples;
+      core.writePcmRaw(samples, variant.outPath);
+    }
+
+    emit({ kind: 'phase', phase: 'vad', totalAudioSec });
+    const values = [];
+    for (const candidate of (Array.isArray(candidates) ? candidates : [])) {
+      const variant = variants.find((item) => Number(item.strength) === Number(candidate.options.denoiseStrength));
+      if (!variant) throw new Error(`認識設定の調整用音声がありません: ${candidate.options.denoiseStrength}`);
+      const samples = loadPcm(variant.outPath);
+      const segments = core.collectVadSegments(samples, vadFor(candidate.options.vad || {}));
+      values.push({
+        id: candidate.id,
+        pcmPath: variant.outPath,
+        segments: segments.map((segment) => ({ start: segment.start, end: segment.end })),
+      });
+    }
+    return {
+      candidates: values,
+      speakerSegments,
+      speakerError,
+      sourceOffsetSeconds: decodeWindow.decodeStartSeconds,
+      range: {
+        startSeconds: decodeWindow.startSeconds,
+        requestedDurationSeconds: decodeWindow.durationSeconds,
+        actualDurationSeconds,
+        selectionStartSeconds: decodeWindow.selectionStartSeconds,
+        selectionEndSeconds: decodeWindow.selectionStartSeconds + actualDurationSeconds,
+      },
+    };
+  },
+
+  // 粗探索の最良候補周辺だけを追加分割する。PCM は prepareAutoTune が生成済み。
+  async segmentAutoTuneCandidates({ candidates }, emit) {
+    const values = [];
+    const input = Array.isArray(candidates) ? candidates : [];
+    for (let index = 0; index < input.length; index++) {
+      const candidate = input[index];
+      emit({ kind: 'candidate', index, total: input.length });
+      const samples = loadPcm(candidate.pcmPath);
+      const segments = core.collectVadSegments(samples, vadFor(candidate.options.vad || {}));
+      values.push({
+        id: candidate.id,
+        pcmPath: candidate.pcmPath,
+        segments: segments.map((segment) => ({ start: segment.start, end: segment.end })),
+      });
+    }
+    return values;
+  },
+
   // 原音で重なり検出 → ノイズ除去 → 共有 PCM 保存 → VAD/話者区間境界を返す
   async prepare({ filePath, denoiseStrength, outPath, vad, overlap, range }, emit) {
     emit({ kind: 'phase', phase: 'decoding' });

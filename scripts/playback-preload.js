@@ -16,7 +16,11 @@ const noop = () => {};
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let transcribeStatusListener = noop;
 let trialStatusListener = noop;
+let autoTuneStatusListener = noop;
 let transcribeCalls = 0;
+let overlapSkipRequested = false;
+let nextAutoTuneFailure = false;
+const cancelledAutoTunes = new Set();
 let appPreferences = { confirmOnCloseWithUnsaved: true };
 let nextExportSaved = true;
 let nextAudioSaved = false;
@@ -79,6 +83,7 @@ contextBridge.exposeInMainWorld('api', {
   mediaUrl,
   transcribe: async (_filePath, jobId, opts) => {
     transcribeCalls++;
+    overlapSkipRequested = false;
     ipcRenderer.send('transcribe-opts', opts);
     transcribeStatusListener({
       jobId, state: 'queued', phase: 'queued', queuePosition: 1, queueTotal: 1,
@@ -99,7 +104,7 @@ contextBridge.exposeInMainWorld('api', {
       throw new Error(error.technical);
     }
     transcribeStatusListener({ jobId, state: 'running', phase: 'overlap', totalAudioSec: RESULT.duration });
-    await pause(20);
+    for (let waited = 0; waited < 300 && !overlapSkipRequested; waited += 10) await pause(10);
     transcribeStatusListener({ jobId, state: 'running', phase: 'vad', totalAudioSec: RESULT.duration });
     await pause(20);
     transcribeStatusListener({
@@ -118,6 +123,11 @@ contextBridge.exposeInMainWorld('api', {
     return RESULT;
   },
   cancelTranscribe: async () => true,
+  skipTranscribeOverlap: async (jobId) => {
+    overlapSkipRequested = true;
+    ipcRenderer.send('overlap-skip', jobId);
+    return true;
+  },
   onTranscribeStatus: (cb) => { transcribeStatusListener = cb; },
   onTranscribeProgress: noop,
   transcribeTrial: async (_filePath, jobId, trialId, opts) => {
@@ -136,6 +146,67 @@ contextBridge.exposeInMainWorld('api', {
   },
   cancelTranscribeTrial: async () => true,
   onTranscribeTrialStatus: (cb) => { trialStatusListener = cb; },
+  autoTune: async (_filePath, jobId, tuneId, opts) => {
+    const shouldFail = nextAutoTuneFailure;
+    nextAutoTuneFailure = false;
+    const tuneKey = `${jobId}:${tuneId}`;
+    const throwIfCancelled = () => {
+      if (!cancelledAutoTunes.delete(tuneKey)) return;
+      throw new Error('中止しました');
+    };
+    ipcRenderer.send('auto-tune-opts', opts);
+    autoTuneStatusListener({ jobId, tuneId, state: 'queued', phase: 'queued', queuePosition: 1, queueTotal: 1 });
+    await pause(20);
+    throwIfCancelled();
+    autoTuneStatusListener({ jobId, tuneId, state: 'running', phase: 'decoding', candidateIndex: 0, totalCandidates: 8 });
+    await pause(20);
+    throwIfCancelled();
+    autoTuneStatusListener({ jobId, tuneId, state: 'running', phase: 'tuning', candidateIndex: 4, totalCandidates: 8, candidateLabel: 'interview-0' });
+    await pause(40);
+    throwIfCancelled();
+    if (shouldFail) {
+      autoTuneStatusListener({ jobId, tuneId, state: 'error', phase: 'tuning' });
+      throw new Error('ENOSPC: auto tune test');
+    }
+    autoTuneStatusListener({ jobId, tuneId, state: 'completed', phase: 'finalizing', ratio: 1 });
+    return {
+      best: {
+        id: 'test-best', label: 'テスト候補',
+        options: {
+          denoiseStrength: 0.5,
+          vad: {
+            maxSpeechDuration: 4, minSilenceDuration: 0.1,
+            minSpeechDuration: 0.15, threshold: 0.3,
+            overlapAware: true, overlapSpeakers: 2,
+          },
+        },
+        metrics: {
+          referenceLength: 55, hypothesisLength: 52, matches: 48,
+          substitutions: 2, deletions: 3, insertions: 2,
+          weightedErrors: 8.05, accuracy: 0.854,
+        },
+        result: { ...TRIAL_RESULT, jobId },
+      },
+      baselineAccuracy: 0.7,
+      improvement: 0.154,
+      confidence: 'high',
+      speakerCount: 2,
+      speakerAnalysisWarning: '',
+      range: TRIAL_RESULT.range,
+      candidates: [],
+    };
+  },
+  cancelAutoTune: async (jobId, tuneId) => {
+    cancelledAutoTunes.add(`${jobId}:${tuneId}`);
+    autoTuneStatusListener({ jobId, tuneId, state: 'cancelling', phase: 'tuning' });
+    return true;
+  },
+  onAutoTuneStatus: (cb) => { autoTuneStatusListener = cb; },
+  segmentCandidates: async (_filePath, request) => ([
+    { label: '指定した区間', start: request.start, end: request.end, text: '候補の文字起こしです' },
+    { label: '前後を0.2秒広げる', start: Math.max(0, request.start - 0.2), end: request.end + 0.2, text: '別の候補です' },
+  ]),
+  testSetNextAutoTuneFailure: () => { nextAutoTuneFailure = true; },
   computeEmbeddings: async () => ({ ok: true, count: RESULT.segments.length }),
   onEmbedProgress: noop,
   // 区間クリップ（フォールバック経路）。呼ばれたことを主側へ通知する
@@ -143,7 +214,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.send('clip-used');
     return { wavPath: path.join(SAMPLES, 'test.wav') };
   },
-  previewRange: async () => ({ wavPath: path.join(SAMPLES, 'test.wav') }),
+  // 仕上がりテスト結果（19.03秒）と同じ長さの音源を返し、タイムライン終端まで検証できるようにする。
+  previewRange: async () => ({ wavPath: TARGET }),
   // 本物と同じく中身を丸ごと返す（Blob 化はレンダラ側の責務）
   readMedia: async (filePath) => ({
     data: require('fs').readFileSync(filePath),
@@ -167,7 +239,8 @@ contextBridge.exposeInMainWorld('api', {
     return saved ? { saved: true, path: 'recording.wav' } : { saved: false };
   },
   testSetNextExportSaved: (saved) => { nextExportSaved = !!saved; },
-  saveExport: async () => {
+  saveExport: async (result, format) => {
+    ipcRenderer.send('export-payload', { result, format });
     const saved = nextExportSaved;
     nextExportSaved = true;
     return saved ? { saved: true, path: 'test.txt' } : { saved: false };

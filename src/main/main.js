@@ -13,6 +13,7 @@ const overlapTools = require('../shared/overlap');
 const transcriptionProgress = require('../shared/transcriptionProgress');
 const rangeTools = require('../shared/transcriptionRange');
 const unsavedState = require('../shared/unsavedState');
+const autoTune = require('../shared/autoTune');
 const SerialJobQueue = require('./serialJobQueue');
 const { registerMediaProtocol, MEDIA_MIME } = require('./mediaProtocol');
 
@@ -36,6 +37,8 @@ let closeDialogOpen = false;
 let quitRequested = false;
 const previewDir = path.join(os.tmpdir(), 'reazonspeech-preview');
 const cancelled = new Set(); // 中止された jobId
+const skipOverlapRequested = new Set(); // 重なり解析を中断し、通常解析へ切り替える jobId
+const activeTranscriptionPhases = new Map(); // 実行中ジョブの工程（スキップ可否の判定用）
 const jobEmbeddings = new Map(); // jobId -> number[][]（区間順、手本ベース再識別用）
 
 function cacheEmbeddings(jobId, embs) {
@@ -550,8 +553,27 @@ ipcMain.handle('transcribe:cancel', (event, jobId) => {
   return true;
 });
 
+ipcMain.handle('transcribe:skip-overlap', (event, jobId) => {
+  if (batchQueue.activeId !== jobId || activeTranscriptionPhases.get(jobId) !== 'overlap') {
+    return false;
+  }
+  if (skipOverlapRequested.has(jobId)) return true;
+  skipOverlapRequested.add(jobId);
+  deliverTranscribeStatus(event.sender, jobId, {
+    state: 'running', phase: 'overlap', skippingOverlap: true,
+  });
+  // diarizer.process は途中経過や個別の中断APIを持たないため、ワーカーを停止する。
+  // performTranscription 側で重なり解析を無効にして前処理から安全に再開する。
+  destroyPool();
+  return true;
+});
+
 function trialRunKey(jobId, trialId) {
   return `trial:${String(jobId)}:${String(trialId)}`;
+}
+
+function autoTuneRunKey(jobId, tuneId) {
+  return `auto-tune:${String(jobId)}:${String(tuneId)}`;
 }
 
 ipcMain.handle('transcribe:trial-cancel', (event, jobId, trialId) => {
@@ -568,6 +590,25 @@ ipcMain.handle('transcribe:trial-cancel', (event, jobId, trialId) => {
   if (batchQueue.activeId !== runKey) return false;
   cancelled.add(runKey);
   deliverTranscribeStatus(event.sender, jobId, { state: 'cancelling' }, delivery);
+  destroyPool();
+  return true;
+});
+
+ipcMain.handle('transcribe:auto-tune-cancel', (event, jobId, tuneId) => {
+  const runKey = autoTuneRunKey(jobId, tuneId);
+  const delivery = {
+    channel: 'transcribe:auto-tune-status', taskbar: false, queueId: runKey, extra: { tuneId },
+  };
+  if (batchQueue.hasQueued(runKey)) {
+    const error = transcriptionProgress.describeError(new Error('中止しました'), 'queued', true);
+    deliverTranscribeStatus(event.sender, jobId, { state: 'cancelled', phase: 'queued', error }, delivery);
+    batchQueue.cancelQueued(runKey, new Error('中止しました'));
+    return true;
+  }
+  if (batchQueue.activeId !== runKey) return false;
+  cancelled.add(runKey);
+  deliverTranscribeStatus(event.sender, jobId, { state: 'cancelling', phase: 'tuning' }, delivery);
+  // ネイティブ推論の途中でも確実に止めるため、既存の文字起こし中止と同じ扱いにする。
   destroyPool();
   return true;
 });
@@ -634,6 +675,24 @@ ipcMain.handle('clip:segment', async (event, filePath, start, end) => {
   return rpc(pool[0], 'clip', { filePath, start, end, outPath });
 });
 
+// 修正タイムラインの1発話について、境界違いの認識候補を遅延生成する。
+// 通常の文字起こしと同時にモデルを使わないよう、同じ直列キューへ積む。
+ipcMain.handle('transcribe:segment-candidates', (event, filePath, request = {}) => {
+  const requestId = `segment-candidates-${randomUUID()}`;
+  return batchQueue.enqueue({
+    id: requestId,
+    run: async () => {
+      await ensurePool();
+      return rpc(pool[0], 'segmentCandidates', {
+        filePath,
+        start: Number(request.start),
+        end: Number(request.end),
+        denoiseStrength: Number(request.denoiseStrength) || 0,
+      });
+    },
+  });
+});
+
 async function performTranscription(sender, filePath, runId, opts = {}, execution = {}) {
   const publicJobId = execution.jobId == null ? runId : execution.jobId;
   const safeRunId = String(runId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
@@ -645,8 +704,10 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
     extra: execution.trialId == null ? {} : { trialId: execution.trialId },
   };
   let currentPhase = 'preparing';
+  activeTranscriptionPhases.set(runId, currentPhase);
   const sendStatus = (payload = {}) => {
     if (payload.phase) currentPhase = payload.phase;
+    activeTranscriptionPhases.set(runId, currentPhase);
     deliverTranscribeStatus(sender, publicJobId, {
       state: 'running', phase: currentPhase, ...payload,
     }, delivery);
@@ -678,7 +739,7 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
       numSpeakers: Number.isInteger(vadOpts.overlapSpeakers)
         ? Math.min(4, Math.max(2, vadOpts.overlapSpeakers)) : 2,
     };
-    const prep = await rpc(pool[0], 'prepare', {
+    const prepareAudio = () => rpc(pool[0], 'prepare', {
       filePath, denoiseStrength: opts.denoiseStrength || 0, outPath: pcmPath,
       vad: vadOpts, // 発話検出の設定（未指定なら core の標準値）
       overlap: overlapOpts,
@@ -688,6 +749,27 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
         sendStatus({ phase: ev.phase, totalAudioSec: ev.totalAudioSec || 0 });
       }
     });
+    let prep;
+    let overlapSkipped = false;
+    try {
+      prep = await prepareAudio();
+    } catch (error) {
+      // スキップ操作でワーカーを終了した場合だけ、通常解析として再開する。
+      if (!skipOverlapRequested.has(runId)) throw error;
+    }
+    if (skipOverlapRequested.delete(runId)) {
+      overlapSkipped = true;
+      overlapOpts.enabled = false;
+      sendStatus({ phase: 'preparing', skippingOverlap: true });
+      checkCancel(runId);
+      await ensurePool();
+      checkCancel(runId);
+      prep = await prepareAudio();
+      sendStatus({
+        state: 'warning',
+        warning: '重なり音声の解析をスキップし、通常の文字起こしを続けています。',
+      });
+    }
     checkCancel(runId);
     const maxDuration = (typeof vadOpts.maxSpeechDuration === 'number' && isFinite(vadOpts.maxSpeechDuration))
       ? Math.min(30, Math.max(2, vadOpts.maxSpeechDuration)) : 6;
@@ -794,6 +876,7 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
       range: resultRange,
       overlap: {
         enabled: overlapOpts.enabled,
+        skipped: overlapSkipped,
         detected: recognitionPlan.overlapIntervals.length,
         recovered: finalized.recoveredGroups,
         error: prep.overlapError || '',
@@ -807,7 +890,360 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
     throw e;
   } finally {
     cancelled.delete(runId);
+    skipOverlapRequested.delete(runId);
+    activeTranscriptionPhases.delete(runId);
     fs.rm(pcmPath, { force: true }, () => {});
+  }
+}
+
+function intervalSeconds(a, b) {
+  if (!a || !b) return 0;
+  return Math.max(0, Math.min(Number(a.end) || 0, Number(b.end) || 0)
+    - Math.max(Number(a.start) || 0, Number(b.start) || 0));
+}
+
+// pyannote の内部クラスタ番号を、利用者が手本へ付けた話者IDへ対応付ける。
+// 2〜4人なので全組合せ最適化より、重なり時間の大きい組から一対一で確定する方が
+// 欠損行にも安定し、対応が付かなかったクラスタは「不明」のまま扱える。
+function mapTuneSpeakers(referenceRows, speakerSegments, sourceOffsetSeconds) {
+  const rows = autoTune.normalizeReferenceRows(referenceRows);
+  const labels = [...new Set(rows.map((row) => row.speaker))];
+  if (labels.length < 2 || !speakerSegments.length) return new Map();
+  const clusters = [...new Set(speakerSegments.map((segment) => String(segment.speaker)))];
+  const pairs = [];
+  for (const cluster of clusters) {
+    const tracks = speakerSegments
+      .filter((segment) => String(segment.speaker) === cluster)
+      .map((segment) => ({
+        start: segment.start + sourceOffsetSeconds,
+        end: segment.end + sourceOffsetSeconds,
+      }));
+    for (const label of labels) {
+      const score = rows.filter((row) => row.speaker === label && row.start != null && row.end != null)
+        .reduce((sum, row) => sum + tracks.reduce((n, track) => n + intervalSeconds(row, track), 0), 0);
+      pairs.push({ cluster, label, score });
+    }
+  }
+  pairs.sort((a, b) => b.score - a.score);
+  const usedClusters = new Set();
+  const usedLabels = new Set();
+  const mapping = new Map();
+  for (const pair of pairs) {
+    if (pair.score <= 0 || usedClusters.has(pair.cluster) || usedLabels.has(pair.label)) continue;
+    mapping.set(pair.cluster, pair.label);
+    usedClusters.add(pair.cluster);
+    usedLabels.add(pair.label);
+  }
+  return mapping;
+}
+
+function assignTuneSpeaker(segment, speakerSegments, mapping) {
+  let best = null;
+  let bestSeconds = 0;
+  for (const track of speakerSegments) {
+    const overlap = intervalSeconds(segment, track);
+    if (overlap > bestSeconds) { bestSeconds = overlap; best = String(track.speaker); }
+  }
+  return best == null ? '' : (mapping.get(best) || '');
+}
+
+function tuneSpeakerAccuracy(referenceRows, segments, speakerSegments, mapping) {
+  const rows = autoTune.normalizeReferenceRows(referenceRows);
+  const labels = [...new Set(rows.map((row) => row.speaker))];
+  if (labels.length < 2 || !mapping.size) return null;
+  let referenceLength = 0;
+  let weightedErrors = 0;
+  for (const label of labels) {
+    const reference = rows.filter((row) => row.speaker === label).map((row) => row.normalizedText).join('');
+    const hypothesis = segments.filter((segment) => segment.referenceSpeaker === label)
+      .map((segment) => segment.text).join('');
+    const metrics = autoTune.scoreText(reference, hypothesis);
+    referenceLength += metrics.referenceLength;
+    weightedErrors += metrics.weightedErrors;
+  }
+  return Math.max(0, 1 - weightedErrors / Math.max(1, referenceLength));
+}
+
+function tuneRecognitionKey(pcmPath, item) {
+  return `${pcmPath}|${Number(item.start).toFixed(3)}:${Number(item.end).toFixed(3)}`;
+}
+
+async function recognizeTunePlan(runId, pcmPath, items, cache) {
+  const unique = [];
+  const pendingKeys = new Set();
+  for (const item of items) {
+    const key = tuneRecognitionKey(pcmPath, item);
+    if (cache.has(key) || pendingKeys.has(key)) continue;
+    pendingKeys.add(key);
+    unique.push({ key, start: item.start, end: item.end });
+  }
+  if (unique.length) {
+    const batches = Array.from({ length: pool.length }, () => []);
+    unique.forEach((item, idx) => batches[idx % pool.length].push({ idx, start: item.start, end: item.end }));
+    await Promise.all(batches.map((batch, workerIndex) => {
+      if (!batch.length) return null;
+      return rpc(pool[workerIndex], 'processBatch', {
+        pcmPath, items: batch, wantEmbedding: false,
+      }).then((results) => {
+        for (const result of results) {
+          const item = unique[result.idx];
+          if (item) cache.set(item.key, String(result.text || '').trim());
+        }
+      });
+    }));
+    checkCancel(runId);
+  }
+  return items.map((item) => ({ ...item, text: cache.get(tuneRecognitionKey(pcmPath, item)) || '' }));
+}
+
+function timedReferenceRows(referenceRows) {
+  return autoTune.normalizeReferenceRows(referenceRows).filter((row) => (
+    row.start != null && row.end != null && row.end > row.start
+  ));
+}
+
+// 未確定の発話が候補側に存在しても「余計な挿入」として減点しないよう、
+// ユーザーが確定した時間窓と重なる認識区間だけを本文評価へ使う。
+function hypothesisForReferenceRows(referenceRows, segments) {
+  const windows = timedReferenceRows(referenceRows);
+  if (!windows.length) return segments.map((segment) => segment.text).join('');
+  return segments.filter((segment) => windows.some((row) => {
+    const overlap = intervalSeconds(row, segment);
+    const midpoint = ((Number(segment.start) || 0) + (Number(segment.end) || 0)) / 2;
+    return overlap >= 0.05 || (midpoint >= row.start && midpoint <= row.end);
+  })).map((segment) => segment.text).join('');
+}
+
+function tuneBoundaryAccuracy(referenceRows, segments) {
+  const rows = timedReferenceRows(referenceRows);
+  if (!rows.length) return null;
+  const total = rows.reduce((sum, row) => {
+    let best = 0;
+    for (const segment of segments) {
+      const intersection = intervalSeconds(row, segment);
+      const union = Math.max(row.end, Number(segment.end) || 0)
+        - Math.min(row.start, Number(segment.start) || 0);
+      if (union > 0) best = Math.max(best, intersection / union);
+    }
+    return sum + best;
+  }, 0);
+  return total / rows.length;
+}
+
+function manualTuneSpeakerTracks(referenceRows, sourceOffsetSeconds) {
+  return timedReferenceRows(referenceRows).map((row) => ({
+    start: Math.max(0, row.start - sourceOffsetSeconds),
+    end: Math.max(0, row.end - sourceOffsetSeconds),
+    speaker: `manual:${row.speaker}`,
+  })).filter((row) => row.end > row.start);
+}
+
+async function evaluateTuneCandidate({
+  runId, candidate, prepared, referenceRows, reference, speakerMapping, recognitionCache,
+}) {
+  const maxDuration = candidate.options.vad.maxSpeechDuration;
+  const manualTracks = manualTuneSpeakerTracks(referenceRows, prepared.sourceOffsetSeconds || 0);
+  const manualOverlapIntervals = overlapTools.detectOverlapIntervals(manualTracks);
+  const plan = overlapTools.buildRecognitionItems(
+    prepared.segments,
+    prepared.speakerSegments || [],
+    {
+      enabled: candidate.options.vad.overlapAware === true,
+      maxDuration,
+      manualOverlapIntervals,
+      manualSpeakerSegments: manualTracks,
+    },
+  );
+  const recognized = await recognizeTunePlan(runId, prepared.pcmPath, plan.items, recognitionCache);
+  const finalized = overlapTools.finalizeRecognition(recognized.filter(Boolean));
+  const selected = rangeTools.selectSegments(
+    finalized.segments,
+    prepared.range.selectionStartSeconds,
+    prepared.range.selectionEndSeconds,
+  );
+  const relative = selected.map((segment) => ({
+    ...segment,
+    referenceSpeaker: assignTuneSpeaker(segment, prepared.speakerSegments, speakerMapping),
+  }));
+  const ordered = rangeTools.offsetSegments(relative, prepared.sourceOffsetSeconds);
+  const hypothesis = hypothesisForReferenceRows(referenceRows, ordered);
+  const metrics = autoTune.scoreText(reference, hypothesis);
+  const speakerAccuracy = tuneSpeakerAccuracy(
+    referenceRows, ordered, prepared.speakerSegments, speakerMapping,
+  );
+  const boundaryAccuracy = tuneBoundaryAccuracy(referenceRows, ordered);
+  let rankScore = metrics.accuracy;
+  if (boundaryAccuracy != null && speakerAccuracy != null) {
+    rankScore = metrics.accuracy * 0.8 + speakerAccuracy * 0.1 + boundaryAccuracy * 0.1;
+  } else if (boundaryAccuracy != null) {
+    rankScore = metrics.accuracy * 0.9 + boundaryAccuracy * 0.1;
+  } else if (speakerAccuracy != null) {
+    rankScore = metrics.accuracy * 0.85 + speakerAccuracy * 0.15;
+  }
+  return {
+    ...candidate,
+    metrics,
+    speakerAccuracy,
+    boundaryAccuracy,
+    rankScore,
+    result: {
+      segments: ordered,
+      text: ordered.map((segment) => segment.text).join('\n'),
+      range: {
+        startSeconds: prepared.range.startSeconds,
+        endSeconds: prepared.range.startSeconds + prepared.range.actualDurationSeconds,
+        durationSeconds: prepared.range.actualDurationSeconds,
+        requestedDurationSeconds: prepared.range.requestedDurationSeconds,
+      },
+      overlap: {
+        enabled: candidate.options.vad.overlapAware === true,
+        detected: plan.overlapIntervals.length,
+        recovered: finalized.recoveredGroups,
+      },
+    },
+  };
+}
+
+async function performAutoTune(sender, filePath, jobId, tuneId, opts = {}) {
+  const runId = autoTuneRunKey(jobId, tuneId);
+  const delivery = {
+    channel: 'transcribe:auto-tune-status', taskbar: false, queueId: runId, extra: { tuneId },
+  };
+  const sendStatus = (payload) => deliverTranscribeStatus(sender, jobId, {
+    state: 'running', phase: 'tuning', ...payload,
+  }, delivery);
+  const rows = autoTune.normalizeReferenceRows(opts.referenceRows).slice(0, 100);
+  const reference = rows.map((row) => row.normalizedText).join('').slice(0, 5000);
+  if (Array.from(reference).length < autoTune.MIN_REFERENCE_CHARS) {
+    throw new Error(`文字起こしを句読点を除いて${autoTune.MIN_REFERENCE_CHARS}文字以上に修正してください。`);
+  }
+  const speakerCount = Math.min(4, Math.max(1, new Set(rows.map((row) => row.speaker)).size));
+  const range = rangeTools.normalizeTrialRange(opts.range || {});
+  const coarse = autoTune.buildCoarseCandidates(opts.current || {}, { speakerCount });
+  const pcmPaths = [];
+  const recognitionCache = new Map();
+  let currentPhase = 'preparing';
+  try {
+    if (rtSessionActive) {
+      throw new Error('リアルタイム文字起こしの実行中は開始できません。先に録音を停止してください。');
+    }
+    sendStatus({ phase: 'preparing', candidateIndex: 0, totalCandidates: coarse.length });
+    await ensurePool();
+    checkCancel(runId);
+    fs.mkdirSync(previewDir, { recursive: true });
+    const strengths = [...new Set(coarse.map((candidate) => candidate.options.denoiseStrength))];
+    const pcmVariants = strengths.map((strength, index) => {
+      const outPath = path.join(previewDir, `tune-${jobId}-${tuneId}-${index}-${Date.now()}.pcm`);
+      pcmPaths.push(outPath);
+      return { strength, outPath };
+    });
+    const prep = await rpc(pool[0], 'prepareAutoTune', {
+      filePath, range, candidates: coarse, pcmVariants, speakerCount,
+    }, (event) => {
+      if (event.kind === 'phase') {
+        currentPhase = event.phase;
+        sendStatus({ phase: event.phase, candidateIndex: 0, totalCandidates: coarse.length });
+      }
+    });
+    checkCancel(runId);
+    const speakerMapping = mapTuneSpeakers(rows, prep.speakerSegments || [], prep.sourceOffsetSeconds || 0);
+    const preparedById = new Map((prep.candidates || []).map((candidate) => [candidate.id, {
+      ...candidate,
+      speakerSegments: prep.speakerSegments || [],
+      sourceOffsetSeconds: prep.sourceOffsetSeconds || 0,
+      range: prep.range,
+    }]));
+
+    const evaluated = [];
+    for (let index = 0; index < coarse.length; index++) {
+      const candidate = coarse[index];
+      currentPhase = 'tuning';
+      sendStatus({
+        phase: 'tuning', candidateIndex: index + 1, totalCandidates: coarse.length,
+        candidateLabel: candidate.label,
+      });
+      const prepared = preparedById.get(candidate.id);
+      if (!prepared) throw new Error(`認識設定の調整候補を準備できませんでした: ${candidate.id}`);
+      evaluated.push(await evaluateTuneCandidate({
+        runId, candidate, prepared, referenceRows: rows, reference,
+        speakerMapping, recognitionCache,
+      }));
+    }
+
+    const coarseBest = autoTune.selectBestCandidate(evaluated);
+    const refinements = autoTune.buildRefinementCandidates(coarseBest, evaluated);
+    if (refinements.length) {
+      const pcmByStrength = new Map(pcmVariants.map((variant) => [Number(variant.strength), variant.outPath]));
+      const segmented = await rpc(pool[0], 'segmentAutoTuneCandidates', {
+        candidates: refinements.map((candidate) => ({
+          ...candidate,
+          pcmPath: pcmByStrength.get(Number(candidate.options.denoiseStrength)),
+        })),
+      });
+      const segmentedById = new Map(segmented.map((candidate) => [candidate.id, {
+        ...candidate,
+        speakerSegments: prep.speakerSegments || [],
+        sourceOffsetSeconds: prep.sourceOffsetSeconds || 0,
+        range: prep.range,
+      }]));
+      const totalCandidates = coarse.length + refinements.length;
+      for (let index = 0; index < refinements.length; index++) {
+        const candidate = refinements[index];
+        sendStatus({
+          phase: 'tuning', candidateIndex: coarse.length + index + 1, totalCandidates,
+          candidateLabel: candidate.label,
+        });
+        evaluated.push(await evaluateTuneCandidate({
+          runId, candidate, prepared: segmentedById.get(candidate.id), referenceRows: rows,
+          reference, speakerMapping, recognitionCache,
+        }));
+      }
+    }
+    checkCancel(runId);
+
+    const best = autoTune.selectBestCandidate(evaluated);
+    if (!best) throw new Error('有効な認識設定の調整結果を得られませんでした。');
+    const baseline = evaluated[0];
+    const confidence = autoTune.confidenceFor(best, evaluated);
+    const ranked = evaluated.slice().sort((a, b) => b.rankScore - a.rankScore);
+    sendStatus({ state: 'completed', phase: 'finalizing', ratio: 1 });
+    return {
+      best: {
+        id: best.id,
+        label: best.label,
+        options: best.options,
+        metrics: best.metrics,
+        speakerAccuracy: best.speakerAccuracy,
+        boundaryAccuracy: best.boundaryAccuracy,
+        rankScore: best.rankScore,
+        result: best.result,
+      },
+      baselineAccuracy: baseline ? baseline.metrics.accuracy : null,
+      improvement: baseline ? best.metrics.accuracy - baseline.metrics.accuracy : 0,
+      confidence,
+      speakerCount,
+      speakerAnalysisWarning: prep.speakerError || '',
+      candidates: ranked.slice(0, 5).map((candidate) => ({
+        id: candidate.id,
+        label: candidate.label,
+        options: candidate.options,
+        metrics: candidate.metrics,
+        speakerAccuracy: candidate.speakerAccuracy,
+        boundaryAccuracy: candidate.boundaryAccuracy,
+        rankScore: candidate.rankScore,
+      })),
+      range: best.result.range,
+    };
+  } catch (error) {
+    const wasCancelled = cancelled.has(runId) || /中止|cancel/i.test(String(error && error.message || error));
+    const described = transcriptionProgress.describeError(error, currentPhase, wasCancelled);
+    deliverTranscribeStatus(sender, jobId, {
+      state: wasCancelled ? 'cancelled' : 'error', phase: currentPhase, error: described,
+    }, delivery);
+    throw error;
+  } finally {
+    cancelled.delete(runId);
+    for (const pcmPath of pcmPaths) fs.rm(pcmPath, { force: true }, () => {});
   }
 }
 
@@ -849,6 +1285,23 @@ ipcMain.handle('transcribe:trial', (event, filePath, jobId, trialId, opts = {}) 
       taskbar: false,
       emitLegacyProgress: false,
     }),
+  }).finally(() => { batchRunKinds.delete(runKey); });
+});
+
+ipcMain.handle('transcribe:auto-tune', (event, filePath, jobId, tuneId, opts = {}) => {
+  const runKey = autoTuneRunKey(jobId, tuneId);
+  const delivery = {
+    channel: 'transcribe:auto-tune-status', taskbar: false, queueId: runKey, extra: { tuneId },
+  };
+  batchRunKinds.set(runKey, 'tune');
+  return batchQueue.enqueue({
+    id: runKey,
+    onPosition: ({ position, total }) => {
+      deliverTranscribeStatus(event.sender, jobId, {
+        state: 'queued', phase: 'queued', queuePosition: position, queueTotal: total,
+      }, delivery);
+    },
+    run: () => performAutoTune(event.sender, filePath, jobId, tuneId, opts),
   }).finally(() => { batchRunKinds.delete(runKey); });
 });
 
@@ -1087,6 +1540,7 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+  mainWindow.maximize();
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   mainWindow.on('close', (event) => {
     if (allowCloseOnce || !unsavedState.shouldConfirm(latestUnsavedState, appPreferences())) return;

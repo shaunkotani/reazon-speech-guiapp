@@ -28,13 +28,37 @@ test('待機中はETAを出さず、遅延警告の対象にしない', () => {
   assert.strictEqual(progress.slowThresholdMs('queued'), Number.POSITIVE_INFINITY);
 });
 
-test('ETAは十分な実績が集まるまで計算中とする', () => {
+test('重なり解析中は推定不能と分かる表示にする', () => {
+  const state = progress.createEtaState();
+  assert.strictEqual(progress.updateEta(state, { phase: 'overlap' }, 1000), '時間がかかります');
+  assert.strictEqual(progress.updateEta(state, {
+    phase: 'overlap', skippingOverlap: true,
+  }, 2000), '通常の文字起こしへ切り替え中');
+});
+
+test('ETAは最初の有効な進捗から表示する', () => {
   const state = progress.createEtaState();
   const status = {
     phase: 'recognizing', completedWorkSec: 0, totalWorkSec: 100,
   };
   assert.strictEqual(progress.updateEta(state, status, 1000), '残り時間を計算中');
-  assert.strictEqual(progress.updateEta(state, { ...status, completedWorkSec: 10 }, 2500), '残り時間を計算中');
+  assert.strictEqual(progress.updateEta(state, { ...status, completedWorkSec: 10 }, 2500), '残り 約15秒');
+});
+
+test('音声秒数がない進捗は区間数へフォールバックする', () => {
+  const state = progress.createEtaState();
+  progress.updateEta(state, { phase: 'recognizing', completed: 0, total: 10 }, 1000);
+  assert.strictEqual(progress.updateEta(state, {
+    phase: 'recognizing', completed: 2, total: 10,
+  }, 4000), '残り 約15秒');
+});
+
+test('件数もない進捗は比率へフォールバックする', () => {
+  const state = progress.createEtaState();
+  progress.updateEta(state, { phase: 'recognizing', ratio: 0 }, 1000);
+  assert.strictEqual(progress.updateEta(state, {
+    phase: 'recognizing', ratio: 0.25,
+  }, 4000), '残り 約10秒未満');
 });
 
 test('ETAは処理済み音声秒数から粗く安定した目安を返す', () => {
