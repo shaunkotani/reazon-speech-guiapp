@@ -20,6 +20,11 @@ test('有効な設定だけを工程一覧へ含める', () => {
   }), [
     'queued', 'preparing', 'decoding', 'denoising', 'vad', 'overlap', 'recognizing', 'finalizing',
   ]);
+  assert.deepStrictEqual(progress.configuredPhases({
+    denoiseStrength: 0, vad: { overlapAware: true, overlapSeparation: true },
+  }), [
+    'queued', 'preparing', 'decoding', 'vad', 'overlap', 'recognizing', 'separating', 'finalizing',
+  ]);
 });
 
 test('待機中はETAを出さず、遅延警告の対象にしない', () => {

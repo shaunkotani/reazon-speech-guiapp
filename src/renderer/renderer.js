@@ -15,6 +15,8 @@ const autoTuneTools = window.AutoTune;
 const correctionTools = window.TranscriptCorrections;
 
 let modelReady = false;
+let separationModelReady = false;
+let separationModelDownload = null;
 let jobSeq = 0;
 let previewSeq = 0; // プレビュー生成リクエストの一意ID
 let trialSeq = 0;   // 短区間テストの一意ID
@@ -138,6 +140,39 @@ async function refreshModelStatus() {
   banner.classList.toggle('hidden', st.ready);
 }
 
+function renderSeparationModelStatus(message = '') {
+  document.querySelectorAll('.separation-model-status').forEach((node) => {
+    node.textContent = message || (separationModelReady ? '分離モデル準備済み' : '初回のみ約20MBを取得します');
+  });
+}
+
+async function refreshSeparationModelStatus() {
+  const status = await window.api.separationModelStatus();
+  separationModelReady = status.ready === true;
+  renderSeparationModelStatus();
+  return status;
+}
+
+async function ensureSeparationModel() {
+  if (separationModelReady) return true;
+  if (!separationModelDownload) {
+    renderSeparationModelStatus('分離モデルをダウンロード中…');
+    separationModelDownload = window.api.downloadSeparationModel()
+      .then((result) => {
+        separationModelReady = result.ready === true;
+        if (!separationModelReady) throw new Error('ダウンロード後のモデル検証に失敗しました');
+        renderSeparationModelStatus('分離モデル準備済み');
+        return true;
+      })
+      .catch((error) => {
+        renderSeparationModelStatus(`取得失敗: ${error.message || error}`);
+        throw error;
+      })
+      .finally(() => { separationModelDownload = null; });
+  }
+  return separationModelDownload;
+}
+
 window.api.onModelProgress((p) => {
   modelProgress.classList.remove('hidden');
   const ratio = (p.fileIndex + 0.5) / p.totalFiles;
@@ -166,22 +201,22 @@ downloadBtn.addEventListener('click', async () => {
 const VAD_PRESETS = {
   standard: {
     maxSpeechDuration: 6, minSilenceDuration: 0.2, minSpeechDuration: 0.15, threshold: 0.5,
-    overlapAware: false, overlapSpeakers: 2,
+    overlapAware: false, overlapSpeakers: 2, overlapSeparation: false,
     note: '精度と文のつながりのバランスを取った設定',
   },
   conversation: {
     maxSpeechDuration: 3, minSilenceDuration: 0.1, minSpeechDuration: 0.2, threshold: 0.7,
-    overlapAware: true, overlapSpeakers: 2,
+    overlapAware: true, overlapSpeakers: 2, overlapSeparation: false,
     note: '同時発話を再解析し、3秒単位で細かく認識する設定（処理時間は長め）',
   },
   interview: {
     maxSpeechDuration: 3, minSilenceDuration: 0.1, minSpeechDuration: 0.15, threshold: 0.2,
-    overlapAware: true, overlapSpeakers: 2,
+    overlapAware: true, overlapSpeakers: 2, overlapSeparation: false,
     note: '小さな声や短い応答を拾いながら、重なり音声を3秒単位で再解析する設定（処理時間は長め）',
   },
   lecture: {
     maxSpeechDuration: 8, minSilenceDuration: 0.35, minSpeechDuration: 0.15, threshold: 0.45,
-    overlapAware: false, overlapSpeakers: 2,
+    overlapAware: false, overlapSpeakers: 2, overlapSeparation: false,
     note: '一人の長めの発話を保ちつつ、認識区間は長くしすぎない設定',
   },
 };
@@ -242,6 +277,11 @@ accToggle.addEventListener('change', async () => {
     markAllTrialResultsForSettingsChange();
   }
   catch (e) { alert(`高精度モードの保存に失敗: ${e.message}`); }
+});
+
+window.api.onSeparationModelProgress((progress) => {
+  const percent = Math.round(Math.max(0, Math.min(1, Number(progress.ratio) || 0)) * 100);
+  renderSeparationModelStatus(`分離モデルを取得中… ${percent}%`);
 });
 
 hwScore.addEventListener('input', () => {
@@ -530,6 +570,7 @@ function trialSettingsFingerprint(opts) {
       threshold: Number(vad.threshold),
       overlapAware: vad.overlapAware === true,
       overlapSpeakers: Number(vad.overlapSpeakers),
+      overlapSeparation: vad.overlapSeparation === true,
     },
   });
 }
@@ -552,8 +593,9 @@ function trialSettingsSummary(opts) {
     `シチュエーション ${scenario}`,
     `最大${Number(vad.maxSpeechDuration) || 6}秒`,
     vad.overlapAware ? `重なり再解析 ${Number(vad.overlapSpeakers) || 2}人` : '重なり再解析なし',
+    vad.overlapSeparation ? '話者別音声分離' : '',
     recognizer.length ? recognizer.join('・') : '通常認識',
-  ].join(' ・ ');
+  ].filter(Boolean).join(' ・ ');
 }
 
 function refreshTrialFreshness(jobId) {
@@ -608,12 +650,12 @@ function applyTrialStatus(status) {
     count.textContent = '';
   } else {
     label.textContent = transcriptionProgress.phaseMeta(status.phase).active;
-    if (status.phase === 'recognizing' && Number(status.total) > 0) {
+    if ((status.phase === 'recognizing' || status.phase === 'separating') && Number(status.total) > 0) {
       count.textContent = `${Number(status.completed) || 0} / ${status.total}区間`;
     } else count.textContent = '';
   }
   const ratio = Number(status.ratio);
-  if (status.phase === 'recognizing' && Number.isFinite(ratio)) {
+  if ((status.phase === 'recognizing' || status.phase === 'separating') && Number.isFinite(ratio)) {
     bar.classList.remove('is-indeterminate');
     bar.style.width = `${Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%`;
   } else {
@@ -1739,6 +1781,13 @@ async function startTranscriptionTrial(jobId) {
   const durationSeconds = Number(durationInput.value) || 60;
   const range = { startSeconds, durationSeconds };
   const opts = job._getTranscribeOpts();
+  if (opts.vad && opts.vad.overlapSeparation && !separationModelReady) {
+    try { await ensureSeparationModel(); }
+    catch (error) {
+      alert(`話者別音声分離モデルを取得できませんでした: ${error.message || error}`);
+      return;
+    }
+  }
   const attempt = {
     range,
     fingerprint: trialSettingsFingerprint(opts),
@@ -1923,6 +1972,7 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
   const vadTh = el.querySelector('.vad-th');
   const overlapAware = el.querySelector('.overlap-aware');
   const overlapSpeakers = el.querySelector('.overlap-speakers');
+  const overlapSeparation = el.querySelector('.overlap-separation');
   const vadPresetNote = el.querySelector('.vad-preset-note');
   const vadBadge = el.querySelector('.vad-custom-badge');
   const savedSelect = el.querySelector('.vad-saved-select');
@@ -2003,6 +2053,7 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
       threshold: Number(vadTh.value),
       overlapAware: overlapAware.checked,
       overlapSpeakers: Number(overlapSpeakers.value),
+      overlapSeparation: overlapSeparation.checked,
     };
   }
 
@@ -2019,7 +2070,8 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
       || current.minSpeechDuration !== reference.minSpeechDuration
       || current.threshold !== reference.threshold
       || current.overlapAware !== reference.overlapAware
-      || current.overlapSpeakers !== reference.overlapSpeakers;
+      || current.overlapSpeakers !== reference.overlapSpeakers
+      || current.overlapSeparation !== (reference.overlapSeparation === true);
   }
   job._hasUnsavedPreset = hasUnsavedPresetDraft;
 
@@ -2050,6 +2102,7 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
     vadTh.value = p.threshold;
     overlapAware.checked = p.overlapAware;
     overlapSpeakers.value = String(p.overlapSpeakers);
+    overlapSeparation.checked = p.overlapSeparation === true;
     syncVadLabels();
     syncOverlapUi();
     vadBadge.classList.add('hidden');
@@ -2138,6 +2191,9 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
 
   function syncOverlapUi() {
     overlapSpeakers.disabled = !overlapAware.checked;
+    overlapSeparation.disabled = !overlapAware.checked;
+    if (!overlapAware.checked) overlapSeparation.checked = false;
+    renderSeparationModelStatus();
   }
 
   // スライダーを動かしたらプリセットから外れた印を出す（値そのものは保持）
@@ -2152,7 +2208,8 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
       && Number(vadMinSpeech.value) === p.minSpeechDuration
       && Number(vadTh.value) === p.threshold
       && overlapAware.checked === p.overlapAware
-      && Number(overlapSpeakers.value) === p.overlapSpeakers;
+      && Number(overlapSpeakers.value) === p.overlapSpeakers
+      && overlapSeparation.checked === (p.overlapSeparation === true);
     vadBadge.textContent = 'カスタム';
     vadBadge.classList.toggle('hidden', same);
     refreshTrialFreshness(jobId);
@@ -2282,6 +2339,20 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
   [vadMax, vadSil, vadMinSpeech, vadTh].forEach((s) => s.addEventListener('input', markCustom));
   overlapAware.addEventListener('change', () => { syncOverlapUi(); markCustom(); });
   overlapSpeakers.addEventListener('change', markCustom);
+  overlapSeparation.addEventListener('change', async () => {
+    if (overlapSeparation.checked) {
+      overlapSeparation.disabled = true;
+      try {
+        await ensureSeparationModel();
+      } catch (error) {
+        overlapSeparation.checked = false;
+        alert(`話者別音声分離モデルを取得できませんでした: ${error.message || error}`);
+      } finally {
+        overlapSeparation.disabled = !overlapAware.checked;
+      }
+    }
+    markCustom();
+  });
   el.querySelector('.vad-reset').addEventListener('click', () => {
     if (presetSource.kind === 'custom') applySavedPreset(presetSource.id);
     else applyBuiltInPreset(presetSource.id, presetSource.scenario);
@@ -2302,6 +2373,7 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
         threshold: Number(vadTh.value),
         overlapAware: overlapAware.checked,
         overlapSpeakers: Number(overlapSpeakers.value),
+        overlapSeparation: overlapSeparation.checked,
       });
       setCustomVadPresets(res.presets);
       applySavedPreset(res.preset.id);
@@ -2350,6 +2422,7 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
     threshold: Number(vadTh.value),
     overlapAware: overlapAware.checked,
     overlapSpeakers: Number(overlapSpeakers.value),
+    overlapSeparation: overlapSeparation.checked,
   });
   job._getTranscribeOpts = () => ({ denoiseStrength, vad: vadOptions() });
   job._hasScenario = hasCompleteSettingChoice;
@@ -2783,13 +2856,25 @@ function addJob(filePath, { name = '', deferPreview = false } = {}) {
   });
 
   // 文字起こし開始
-  const startFullTranscription = () => {
+  const startFullTranscription = async () => {
     if (!hasCompleteSettingChoice()) return;
+    const transcriptionOptions = job._getTranscribeOpts();
+    if (transcriptionOptions.vad && transcriptionOptions.vad.overlapSeparation
+      && !separationModelReady) {
+      startBtn.disabled = true;
+      try { await ensureSeparationModel(); }
+      catch (error) {
+        alert(`話者別音声分離モデルを取得できませんでした: ${error.message || error}`);
+        return;
+      } finally {
+        startBtn.disabled = false;
+      }
+    }
     setAutoTuneWorkflowState(job, 'idle');
     trialModal.classList.add('hidden');
     trialRangeAudio.pause();
     if (trialSharedStop) trialSharedStop();
-    startTranscribe(jobId, filePath, job._getTranscribeOpts());
+    startTranscribe(jobId, filePath, transcriptionOptions);
   };
   startBtn.addEventListener('click', startFullTranscription);
   el.querySelector('.trial-complete-start-btn').addEventListener('click', startFullTranscription);
@@ -3130,7 +3215,8 @@ function updateProgressClock(job) {
     `${current && current.state === 'queued' ? '待機' : '経過'} ${transcriptionProgress.formatElapsed((now - job.progressStartedAt) / 1000)}`;
 
   if (!current || current.state === 'cancelling') return;
-  if (current.phase === 'overlap' || current.phase === 'recognizing' || current.phase === 'finalizing') {
+  if (current.phase === 'overlap' || current.phase === 'separating'
+    || current.phase === 'recognizing' || current.phase === 'finalizing') {
     job.el.querySelector('.eta').textContent = transcriptionProgress.updateEta(job.etaState, current, now);
   }
   const threshold = transcriptionProgress.slowThresholdMs(current.phase, current.totalAudioSec);
@@ -3212,11 +3298,13 @@ function applyTranscribeStatus(jobId, incoming) {
   const count = wrap.querySelector('.progress-count');
   if (progress.state === 'queued') {
     count.textContent = `${progress.queuePosition || 1} / ${progress.queueTotal || 1}件`;
-  } else if ((progress.phase === 'overlap' || progress.phase === 'recognizing')
+  } else if ((progress.phase === 'overlap' || progress.phase === 'separating'
+    || progress.phase === 'recognizing')
     && Number(progress.total) > 0) {
     const done = Math.min(Number(progress.total), Math.max(0, Number(progress.completed) || 0));
     const ratio = isFinite(Number(progress.ratio)) ? Math.max(0, Math.min(1, Number(progress.ratio))) : done / progress.total;
-    const unit = progress.phase === 'overlap' ? 'チャンク' : '区間';
+    const unit = progress.phase === 'overlap' ? 'チャンク'
+      : (progress.phase === 'separating' ? '工程' : '区間');
     count.textContent = `${done} / ${progress.total}${unit}（${Math.round(ratio * 100)}%）`;
   } else {
     count.textContent = '';
@@ -3225,7 +3313,8 @@ function applyTranscribeStatus(jobId, incoming) {
   const bar = wrap.querySelector('.bar');
   const progressBar = bar.parentElement;
   const ratio = Number(progress.ratio);
-  if ((progress.phase === 'overlap' || progress.phase === 'recognizing') && isFinite(ratio)) {
+  if ((progress.phase === 'overlap' || progress.phase === 'separating'
+    || progress.phase === 'recognizing') && isFinite(ratio)) {
     const percent = Math.round(Math.max(0, Math.min(1, ratio)) * 100);
     bar.classList.remove('is-indeterminate');
     bar.style.width = `${percent}%`;
@@ -3383,6 +3472,11 @@ function renderResult(jobId) {
   } else if (result.overlap && result.overlap.error) {
     meta += ' ・ 重なり補正失敗';
   }
+  if (result.overlap && result.overlap.separation) {
+    const separation = result.overlap.separation;
+    if (separation.recovered > 0) meta += ` ・ 話者別分離 ${separation.recovered} 発話`;
+    else if (separation.requested && separation.error) meta += ' ・ 話者別分離は従来方式へ切替';
+  }
   if (job.tagging) {
     const used = new Set(result.segments.map((s) => s.speaker).filter((x) => x != null && x >= 0));
     meta += ` ・ 話者 ${used.size} 人`;
@@ -3404,6 +3498,7 @@ function renderResult(jobId) {
     const row = document.createElement('div');
     row.className = 'seg';
     if (s.overlapRecovered) row.classList.add('overlap-recovered');
+    if (s.overlapSeparated) row.classList.add('overlap-separated');
     if (s.lockedCorrection) row.classList.add('locked-correction');
 
     // ▶ は常時表示（話者タグ付け中でなくても区間を聴き返せるように）
@@ -3430,6 +3525,13 @@ function renderResult(jobId) {
       badge.className = 'overlap-badge';
       badge.textContent = '重なり補正';
       badge.title = '話者の重なりを検出し、境界を変えて再認識した区間です';
+      row.appendChild(badge);
+    }
+    if (s.overlapSeparated) {
+      const badge = document.createElement('span');
+      badge.className = 'overlap-badge';
+      badge.textContent = '話者別分離';
+      badge.title = '重なった音声を2人分に分離し、品質判定を通過した追加発話です';
       row.appendChild(badge);
     }
     if (s.lockedCorrection) {
@@ -4267,3 +4369,7 @@ function addRealtimeResultJob(r) {
 })();
 
 refreshModelStatus();
+refreshSeparationModelStatus().catch(() => {
+  separationModelReady = false;
+  renderSeparationModelStatus('分離モデルの状態を確認できません');
+});

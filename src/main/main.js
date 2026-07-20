@@ -8,8 +8,11 @@ const { app, BrowserWindow, ipcMain, dialog, protocol, shell, Notification } = r
 const { autoUpdater } = require('electron-updater');
 const modelManager = require('./modelManager');
 const exporters = require('../shared/export');
-const { assignByReferences, UNKNOWN_THRESHOLD } = require('../shared/cluster');
+const {
+  assignByReferences, l2normalize, cosineDistance, centroid, UNKNOWN_THRESHOLD,
+} = require('../shared/cluster');
 const overlapTools = require('../shared/overlap');
+const separationTools = require('../shared/separation');
 const transcriptionProgress = require('../shared/transcriptionProgress');
 const rangeTools = require('../shared/transcriptionRange');
 const unsavedState = require('../shared/unsavedState');
@@ -40,6 +43,7 @@ const cancelled = new Set(); // 中止された jobId
 const skipOverlapRequested = new Set(); // 重なり解析を中断し、通常解析へ切り替える jobId
 const activeTranscriptionPhases = new Map(); // 実行中ジョブの工程（スキップ可否の判定用）
 const jobEmbeddings = new Map(); // jobId -> number[][]（区間順、手本ベース再識別用）
+const separatedEmbeddings = new Map(); // jobId -> Map<separationEmbeddingId, number[]>
 const overlapAnalysisCache = new Map(); // 同じ原音・範囲・話者数の再解析を省略するLRU
 const OVERLAP_CACHE_LIMIT = 12;
 const OVERLAP_CACHE_VERSION = 2;
@@ -79,6 +83,13 @@ function readSettings() {
 function writeSettings(s) {
   fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
   fs.writeFileSync(settingsPath(), JSON.stringify(s, null, 2), 'utf8');
+}
+
+function cacheSeparatedEmbeddings(jobId, values) {
+  separatedEmbeddings.set(jobId, values);
+  if (separatedEmbeddings.size > 10) {
+    separatedEmbeddings.delete(separatedEmbeddings.keys().next().value);
+  }
 }
 
 function appPreferences() {
@@ -130,6 +141,7 @@ function normalizeCustomVadPreset(value, fallbackId = '') {
     threshold: clampNumber(p.threshold, 0.1, 0.9, 0.5),
     overlapAware: p.overlapAware === true,
     overlapSpeakers: Math.round(clampNumber(p.overlapSpeakers, 2, 4, 2)),
+    overlapSeparation: p.overlapSeparation === true,
   };
 }
 
@@ -160,11 +172,27 @@ function resolveModels() {
   });
 }
 
+function resolveSeparationModel() {
+  const repo = repoModelsDir();
+  if (repo && modelManager.isSeparationComplete(repo)) {
+    return { baseDir: repo, ready: true, source: 'repo' };
+  }
+  const baseDir = userDataModelsDir();
+  return {
+    baseDir,
+    ready: modelManager.isSeparationComplete(baseDir),
+    source: 'userData',
+  };
+}
+
 // ==== ワーカープール（CPU コア数に応じて並列） ====
 const POOL_SIZE = Math.max(1, Math.min(4, (os.cpus().length || 2) - 1));
 let pool = null;        // [{ proc, rpcs:Map }]
 let poolReady = null;   // 全 init 完了の Promise
 let ridSeq = 0;
+let separatorWorker = null;
+let separatorReady = null;
+let separatorRidSeq = 0;
 
 function spawnWorker(initArgs, forkOptions = {}) {
   const proc = fork(path.join(__dirname, 'asrWorker.js'), [], {
@@ -216,6 +244,79 @@ function ensurePool() {
 function destroyPool() {
   if (pool) for (const w of pool) { try { w.proc.kill(); } catch (_) { /* ignore */ } }
   pool = null; poolReady = null;
+}
+
+function ensureSeparatorWorker() {
+  if (separatorReady) return separatorReady;
+  const resolved = resolveSeparationModel();
+  if (!resolved.ready) return Promise.reject(new Error('話者別音声分離モデルが未取得です'));
+  const { modelPath } = modelManager.separationPathsFor(resolved.baseDir);
+  const proc = fork(path.join(__dirname, 'separatorWorker.js'), [], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
+  });
+  const worker = { proc, rpcs: new Map(), readySettled: false };
+  worker.ready = new Promise((resolve, reject) => {
+    worker.readyResolve = resolve;
+    worker.readyReject = reject;
+  });
+  proc.on('message', (message) => {
+    if (message.type === 'ready') {
+      worker.readySettled = true;
+      worker.readyResolve();
+      return;
+    }
+    if (message.type === 'initError') {
+      worker.readySettled = true;
+      worker.readyReject(new Error(message.message));
+      return;
+    }
+    const request = worker.rpcs.get(message.rid);
+    if (!request) return;
+    if (message.type === 'event') {
+      if (request.onEvent) request.onEvent(message.payload);
+      return;
+    }
+    if (message.type === 'response') {
+      worker.rpcs.delete(message.rid);
+      if (message.error) request.reject(new Error(message.error));
+      else request.resolve(message.result);
+    }
+  });
+  proc.on('exit', () => {
+    if (!worker.readySettled) worker.readyReject(new Error('音声分離ワーカーの起動に失敗しました'));
+    for (const request of worker.rpcs.values()) request.reject(new Error('音声分離ワーカーが終了しました'));
+    worker.rpcs.clear();
+    if (separatorWorker === worker) {
+      separatorWorker = null;
+      separatorReady = null;
+    }
+  });
+  separatorWorker = worker;
+  separatorReady = worker.ready.catch((error) => {
+    destroySeparatorWorker();
+    throw error;
+  });
+  proc.send({ type: 'init', modelPath });
+  return separatorReady;
+}
+
+function separatorRpc(op, args, onEvent) {
+  if (!separatorWorker) return Promise.reject(new Error('音声分離ワーカーが準備されていません'));
+  const rid = ++separatorRidSeq;
+  return new Promise((resolve, reject) => {
+    separatorWorker.rpcs.set(rid, { resolve, reject, onEvent });
+    separatorWorker.proc.send({ type: 'request', rid, op, args });
+  });
+}
+
+function destroySeparatorWorker() {
+  const worker = separatorWorker;
+  separatorWorker = null;
+  separatorReady = null;
+  if (worker) {
+    try { worker.proc.kill(); } catch (_) { /* ignore */ }
+  }
 }
 
 function rpc(w, op, args, onEvent) {
@@ -537,6 +638,30 @@ ipcMain.handle('model:download', async (event) => {
   return { ready: modelManager.isComplete(baseDir) };
 });
 
+ipcMain.handle('model:separation-status', () => {
+  const resolved = resolveSeparationModel();
+  return {
+    ready: resolved.ready,
+    source: resolved.source,
+    model: {
+      id: modelManager.SEPARATION_MODEL.id,
+      name: modelManager.SEPARATION_MODEL.name,
+      bytes: modelManager.SEPARATION_MODEL.bytes,
+      license: modelManager.SEPARATION_MODEL.license,
+      sourceUrl: modelManager.SEPARATION_MODEL.sourceUrl,
+    },
+  };
+});
+
+ipcMain.handle('model:separation-download', async (event) => {
+  const baseDir = userDataModelsDir();
+  await modelManager.downloadSeparation(baseDir, (progress) => {
+    if (!event.sender.isDestroyed()) event.sender.send('model:separation-progress', progress);
+  });
+  destroySeparatorWorker();
+  return { ready: modelManager.isSeparationComplete(baseDir, { verifyHash: true }) };
+});
+
 // 認識設定（辞書＋高精度モード）の取得/保存。保存時はプールを落として次回再構築させる。
 ipcMain.handle('hotwords:get', () => {
   const rs = currentRecognizerSettings();
@@ -627,6 +752,7 @@ ipcMain.handle('transcribe:cancel', (event, jobId) => {
   deliverTranscribeStatus(event.sender, jobId, { state: 'cancelling' });
   // ネイティブ処理は中断できないため、プールを落として確実に止める（次回再生成）
   destroyPool();
+  destroySeparatorWorker();
   return true;
 });
 
@@ -668,6 +794,7 @@ ipcMain.handle('transcribe:trial-cancel', (event, jobId, trialId) => {
   cancelled.add(runKey);
   deliverTranscribeStatus(event.sender, jobId, { state: 'cancelling' }, delivery);
   destroyPool();
+  destroySeparatorWorker();
   return true;
 });
 
@@ -711,12 +838,22 @@ ipcMain.handle('embeddings:compute', async (event, jobId, filePath, denoiseStren
   const sendProgress = (ratio) => mainWindow && mainWindow.webContents.send('embed:progress', { jobId, ratio });
   try {
     sendProgress(0.02);
-    await rpc(pool[0], 'decodePcm', { filePath, denoiseStrength: denoiseStrength || 0, outPath: pcmPath });
     const total = segments.length;
-    const batches = Array.from({ length: pool.length }, () => []);
-    segments.forEach((s, idx) => batches[idx % pool.length].push({ idx, start: s.start, end: s.end }));
-    let done = 0;
+    const separated = separatedEmbeddings.get(jobId) || new Map();
     const embs = new Array(total);
+    const rawItems = [];
+    segments.forEach((segment, idx) => {
+      const cached = segment.separationEmbeddingId
+        ? separated.get(segment.separationEmbeddingId) : null;
+      if (cached) embs[idx] = cached;
+      else rawItems.push({ idx, start: segment.start, end: segment.end });
+    });
+    if (rawItems.length) {
+      await rpc(pool[0], 'decodePcm', { filePath, denoiseStrength: denoiseStrength || 0, outPath: pcmPath });
+    }
+    const batches = Array.from({ length: pool.length }, () => []);
+    rawItems.forEach((item, index) => batches[index % pool.length].push(item));
+    let done = total - rawItems.length;
     await Promise.all(batches.map((items, w) => {
       if (!items.length) return null;
       return rpc(pool[w], 'embedBatch', { pcmPath, items }, (ev) => {
@@ -770,6 +907,188 @@ ipcMain.handle('transcribe:segment-candidates', (event, filePath, request = {}) 
   });
 });
 
+function meanEmbedding(segments) {
+  const values = (Array.isArray(segments) ? segments : [])
+    .map((segment) => segment.embedding)
+    .filter((embedding) => Array.isArray(embedding) && embedding.length);
+  return values.length ? Array.from(centroid(values)) : null;
+}
+
+function assignSeparatedStemSpeakers(stems, anchorsBySpeaker) {
+  const embeddings = stems.map((stem) => stem.embedding);
+  const speakerEntries = [...anchorsBySpeaker.entries()]
+    .filter(([, values]) => values.length)
+    .map(([speaker, values]) => [speaker, centroid(values)]);
+  if (!embeddings.every((embedding) => Array.isArray(embedding) && embedding.length)
+    || speakerEntries.length < 2) return stems;
+
+  let best = null;
+  let secondScore = Infinity;
+  for (let first = 0; first < speakerEntries.length; first++) {
+    for (let second = 0; second < speakerEntries.length; second++) {
+      if (first === second) continue;
+      const d0 = cosineDistance(l2normalize(embeddings[0]), speakerEntries[first][1]);
+      const d1 = cosineDistance(l2normalize(embeddings[1]), speakerEntries[second][1]);
+      const score = d0 + d1;
+      if (!best || score < best.score) {
+        if (best) secondScore = best.score;
+        best = { score, distances: [d0, d1], indexes: [first, second] };
+      } else if (score < secondScore) secondScore = score;
+    }
+  }
+  if (!best || best.distances.some((distance) => distance > UNKNOWN_THRESHOLD)) return stems;
+  const margin = Number.isFinite(secondScore) ? secondScore - best.score : 0;
+  return stems.map((stem, index) => ({
+    ...stem,
+    speakerHint: speakerEntries[best.indexes[index]][0],
+    confidence: Math.max(0, Math.min(1, 1 - best.distances[index])) * Math.min(1, 0.5 + margin * 4),
+  }));
+}
+
+async function runOverlapSeparation({
+  runId, pcmPath, duration, overlapIntervals, speakerSegments, vad,
+  baselineSegments, sendStatus, checkCancelled,
+}) {
+  const windows = separationTools.buildSeparationWindows(overlapIntervals, duration);
+  if (!windows.length) {
+    return { segments: baselineSegments, embeddings: new Map(), requested: true, windows: 0, adopted: 0 };
+  }
+  const resolved = resolveSeparationModel();
+  if (!resolved.ready) throw new Error('話者別音声分離モデルが未取得です');
+  await ensureSeparatorWorker();
+  checkCancelled();
+
+  fs.mkdirSync(previewDir, { recursive: true });
+  const safeRunId = String(runId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
+  const outputDir = fs.mkdtempSync(path.join(previewDir, `separation-${safeRunId}-`));
+  try {
+    let separatedDone = 0;
+    const totalUnits = windows.length * 3;
+    sendStatus({
+      phase: 'separating', completed: 0, total: totalUnits,
+      ratio: 0, totalAudioSec: duration,
+    });
+    const separated = await separatorRpc('separateBatch', {
+      pcmPath, outputDir, windows,
+    }, (event) => {
+      if (event.kind !== 'separationWindow') return;
+      separatedDone += 1;
+      sendStatus({
+        phase: 'separating', completed: separatedDone, total: totalUnits,
+        ratio: separatedDone / totalUnits, totalAudioSec: duration,
+      });
+    });
+    checkCancelled();
+
+    const stemItems = separated.flatMap((entry) => {
+      const window = windows[entry.windowIndex];
+      return entry.files.map((file) => ({
+        windowIndex: entry.windowIndex,
+        stemIndex: file.stemIndex,
+        pcmPath: file.pcmPath,
+        windowStart: window.start,
+        overlapStart: window.overlapStart,
+        overlapEnd: window.overlapEnd,
+      }));
+    });
+    const batches = Array.from({ length: pool.length }, () => []);
+    stemItems.forEach((item, index) => batches[index % pool.length].push(item));
+    const recognizedValues = await Promise.all(batches.map((items, workerIndex) => {
+      if (!items.length) return [];
+      return rpc(pool[workerIndex], 'processSeparatedBatch', { items, vad }, (event) => {
+        if (event.kind !== 'separatedStem') return;
+        separatedDone += 1;
+        sendStatus({
+          phase: 'separating', completed: separatedDone, total: totalUnits,
+          ratio: Math.min(1, separatedDone / totalUnits), totalAudioSec: duration,
+        });
+      });
+    }));
+    checkCancelled();
+
+    const anchors = separationTools.buildSpeakerAnchorItems(
+      windows, speakerSegments, overlapIntervals,
+    );
+    const anchorEmbeddings = new Map();
+    if (anchors.length) {
+      const anchorBatches = Array.from({ length: pool.length }, () => []);
+      anchors.forEach((item, index) => anchorBatches[index % pool.length].push(item));
+      const anchorResults = await Promise.all(anchorBatches.map((items, workerIndex) => (
+        items.length ? rpc(pool[workerIndex], 'embedBatch', { pcmPath, items }) : []
+      )));
+      const metadata = new Map(anchors.map((item) => [item.idx, item]));
+      for (const result of anchorResults.flat()) {
+        const item = metadata.get(result.idx);
+        if (!item || !Array.isArray(result.embedding)) continue;
+        const key = `${item.windowIndex}:${item.speaker}`;
+        if (!anchorEmbeddings.has(key)) anchorEmbeddings.set(key, []);
+        anchorEmbeddings.get(key).push(result.embedding);
+      }
+    }
+
+    const recognized = recognizedValues.flat();
+    const additions = [];
+    const embeddingCache = new Map();
+    const rejectedReasons = {};
+    let adopted = 0;
+    for (const window of windows) {
+      let stems = [0, 1].map((stemIndex) => {
+        const result = recognized.find((item) => item.windowIndex === window.index
+          && item.stemIndex === stemIndex) || { segments: [] };
+        return {
+          stemIndex,
+          segments: result.segments || [],
+          embedding: meanEmbedding(result.segments || []),
+        };
+      });
+      const anchorsForWindow = new Map();
+      for (const [key, values] of anchorEmbeddings) {
+        const prefix = `${window.index}:`;
+        if (key.startsWith(prefix)) anchorsForWindow.set(key.slice(prefix.length), values);
+      }
+      stems = assignSeparatedStemSpeakers(stems, anchorsForWindow);
+      const entry = separated.find((item) => item.windowIndex === window.index);
+      const metrics = { ...(entry && entry.metrics ? entry.metrics : {}) };
+      if (stems[0].embedding && stems[1].embedding) {
+        metrics.embeddingDistance = cosineDistance(
+          l2normalize(stems[0].embedding), l2normalize(stems[1].embedding),
+        );
+      }
+      const decision = separationTools.selectSeparatedAdditions({
+        window, stems, metrics, baselineSegments,
+      });
+      if (!decision.accepted) {
+        rejectedReasons[decision.reason] = (rejectedReasons[decision.reason] || 0) + 1;
+        continue;
+      }
+      adopted += 1;
+      for (const segment of decision.additions) {
+        const stem = stems[segment.separationTrack];
+        const embedding = segment.embedding || (stem && stem.embedding);
+        const embeddingId = `sep-${runId}-${window.index}-${segment.separationTrack}-${embeddingCache.size}`;
+        const { embedding: _embedding, ...clean } = segment;
+        if (embedding) embeddingCache.set(embeddingId, embedding);
+        additions.push({
+          ...clean,
+          separationEmbeddingId: embedding ? embeddingId : undefined,
+        });
+      }
+    }
+    return {
+      segments: separationTools.mergeSeparatedSegments(baselineSegments, additions),
+      embeddings: embeddingCache,
+      requested: true,
+      windows: windows.length,
+      adopted,
+      recovered: additions.length,
+      rejectedReasons,
+      model: modelManager.SEPARATION_MODEL.id,
+    };
+  } finally {
+    fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+}
+
 async function performTranscription(sender, filePath, runId, opts = {}, execution = {}) {
   const publicJobId = execution.jobId == null ? runId : execution.jobId;
   const safeRunId = String(runId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
@@ -817,6 +1136,7 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
       enabled: vadOpts.overlapAware === true,
       numSpeakers: Number.isInteger(vadOpts.overlapSpeakers)
         ? Math.min(4, Math.max(2, vadOpts.overlapSpeakers)) : 2,
+      separation: vadOpts.overlapSeparation === true,
     };
     const denoiseStrength = Number(opts.denoiseStrength) || 0;
     const overlapPcmPath = overlapOpts.enabled && denoiseStrength > 0 ? rawPcmPath : pcmPath;
@@ -1012,14 +1332,53 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
       totalAudioSec: reportedDuration,
     });
     const finalized = overlapTools.finalizeRecognition(partial.filter(Boolean));
+    let separationResult = {
+      segments: finalized.segments,
+      embeddings: new Map(),
+      requested: overlapOpts.separation,
+      windows: 0,
+      adopted: 0,
+      recovered: 0,
+      error: '',
+    };
+    if (overlapOpts.enabled && overlapOpts.separation
+      && recognitionPlan.overlapIntervals.length) {
+      try {
+        separationResult = await runOverlapSeparation({
+          runId,
+          pcmPath: overlapPcmPath,
+          duration: prep.duration,
+          overlapIntervals: recognitionPlan.overlapIntervals,
+          speakerSegments: prep.speakerSegments || [],
+          vad: vadOpts,
+          baselineSegments: finalized.segments,
+          sendStatus,
+          checkCancelled: () => checkCancel(runId),
+        });
+      } catch (error) {
+        if (cancelled.has(runId) || /中止|cancel/i.test(String(error && error.message))) throw error;
+        separationResult.error = error.message || String(error);
+        sendStatus({
+          state: 'warning', phase: 'separating',
+          warning: '話者別音声分離を適用できなかったため、従来の重なり補正結果を使用します。',
+          warningDetail: separationResult.error,
+          totalAudioSec: reportedDuration,
+        });
+      }
+    }
+    checkCancel(runId);
+    sendStatus({ phase: 'finalizing', ratio: 1, totalAudioSec: reportedDuration });
     const selected = prep.range
       ? rangeTools.selectSegments(
-        finalized.segments,
+        separationResult.segments,
         prep.range.selectionStartSeconds,
         prep.range.selectionEndSeconds,
       )
-      : finalized.segments;
+      : separationResult.segments;
     const ordered = rangeTools.offsetSegments(selected, sourceOffsetSeconds);
+    if (!execution.trialId) {
+      cacheSeparatedEmbeddings(publicJobId, separationResult.embeddings);
+    }
     sendProgress(1);
     sendStatus({ state: 'completed', phase: 'finalizing', ratio: 1, totalAudioSec: reportedDuration });
     return {
@@ -1036,6 +1395,15 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
         candidatesRecognized: done,
         candidatesPlanned: plannedTotal,
         error: prep.overlapError || '',
+        separation: {
+          requested: overlapOpts.separation,
+          model: separationResult.model || modelManager.SEPARATION_MODEL.id,
+          windows: separationResult.windows || 0,
+          adopted: separationResult.adopted || 0,
+          recovered: separationResult.recovered || 0,
+          rejectedReasons: separationResult.rejectedReasons || {},
+          error: separationResult.error || '',
+        },
       },
       filePath, name: path.basename(filePath), jobId: publicJobId,
     };
@@ -1604,6 +1972,7 @@ ipcMain.handle('app:dataInfo', () => ({
 // データ初期化：モデル・設定・辞書・一時ファイルを削除（アプリ本体は残す）。
 ipcMain.handle('app:wipeData', async () => {
   destroyPool(); // モデル .onnx のロックを解放
+  destroySeparatorWorker();
   destroyRtWorker();
   await new Promise((r) => setTimeout(r, 250)); // ワーカー終了とロック解放を待つ
   removeKnownData();
@@ -1613,6 +1982,7 @@ ipcMain.handle('app:wipeData', async () => {
 // 完全アンインストール：既知データを消し、quit 後に残りと本体を除去して終了する。
 ipcMain.handle('app:uninstall', async () => {
   destroyPool();
+  destroySeparatorWorker();
   destroyRtWorker();
   await new Promise((r) => setTimeout(r, 250));
   removeKnownData();
@@ -1668,6 +2038,7 @@ ipcMain.handle('update:install', async () => {
   if (!(await confirmAppCloseIfNeeded())) return { ok: false, cancelled: true };
   allowCloseOnce = true;
   destroyPool(); // ワーカーを止めてからインストーラへ
+  destroySeparatorWorker();
   destroyRtWorker();
   // isSilent=false（インストーラUIを表示）, isForceRunAfter=true（更新後に再起動）
   setImmediate(() => autoUpdater.quitAndInstall(false, true));
@@ -1743,6 +2114,7 @@ app.on('before-quit', (event) => {
 // 実際の終了が確定してから後始末する。
 app.on('will-quit', () => {
   destroyPool();
+  destroySeparatorWorker();
   destroyRtWorker();
   // 一時ファイルを掃除
   try { fs.rmSync(previewDir, { recursive: true, force: true }); } catch (_) { /* ignore */ }

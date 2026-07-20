@@ -111,4 +111,12 @@ function assignByReferences(embeddings, references, { threshold = null } = {}) {
   });
 }
 
-module.exports = { clusterEmbeddings, assignByReferences, DIARIZE_THRESHOLD, UNKNOWN_THRESHOLD };
+module.exports = {
+  clusterEmbeddings,
+  assignByReferences,
+  l2normalize,
+  cosineDistance,
+  centroid,
+  DIARIZE_THRESHOLD,
+  UNKNOWN_THRESHOLD,
+};

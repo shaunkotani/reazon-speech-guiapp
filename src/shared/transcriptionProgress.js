@@ -10,6 +10,7 @@
     preparing: { label: '認識エンジンを準備', active: '認識エンジンを準備中…', slowMs: 60000 },
     decoding: { label: '音声を読み込み・変換', active: '音声を読み込み・変換中…', slowMs: 60000 },
     overlap: { label: '重なり音声を解析', active: '重なり音声を解析中…', slowMs: 90000 },
+    separating: { label: '重なった声を話者別に分離', active: '重なった声を話者別に分離中…', slowMs: 90000 },
     denoising: { label: 'ノイズを除去', active: 'ノイズを除去中…', slowMs: 60000 },
     vad: { label: '発話区間を検出', active: '発話区間を検出中…', slowMs: 45000 },
     recognizing: { label: '音声を文字に変換', active: '音声を文字に変換中…', slowMs: 45000 },
@@ -26,6 +27,7 @@
       'vad',
       ...(vad.overlapAware === true ? ['overlap'] : []),
       'recognizing',
+      ...(vad.overlapAware === true && vad.overlapSeparation === true ? ['separating'] : []),
       'finalizing',
     ];
   }
@@ -94,7 +96,7 @@
       state.smoothedRemaining = null;
       return '通常の文字起こしへ切り替え中';
     }
-    if (!['overlap', 'recognizing'].includes(status.phase)) {
+    if (!['overlap', 'recognizing', 'separating'].includes(status.phase)) {
       state.phaseStartedAt = 0;
       state.smoothedRemaining = null;
       return '残り時間を計算中';
@@ -119,7 +121,7 @@
 
   function slowThresholdMs(phase, totalAudioSec = 0) {
     const base = phaseMeta(phase).slowMs;
-    if (!['overlap', 'denoising', 'vad'].includes(phase)) return base;
+    if (!['overlap', 'separating', 'denoising', 'vad'].includes(phase)) return base;
     // 長い音声の前処理では更新間隔も長くなる。最大5分まで音声長に応じて猶予を持たせる。
     const durationAllowance = Math.min(300000, Math.max(0, Number(totalAudioSec) || 0) * 150);
     return Math.max(base, durationAllowance);

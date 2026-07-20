@@ -609,6 +609,17 @@ async function main() {
       && j.querySelector('.vad-sil').value === '0.1'
       && j.querySelector('.vad-min-speech').value === '0.2';`),
     '会話・電話プリセットへ指定値が入り、重なり再解析がON');
+  check(await run(`const j=document.querySelector('.job');
+    return !j.querySelector('.overlap-separation').disabled
+      && !j.querySelector('.overlap-separation').checked
+      && j.querySelector('.separation-model-status').textContent.includes('準備済み');`),
+    '重なり再解析時だけ話者別音声分離を選べ、モデル状態を表示する');
+  await run(`const c=document.querySelector('.job .overlap-separation');
+    c.checked=true; c.dispatchEvent(new Event('change'));`);
+  await waitFor(`document.querySelector('.job .overlap-separation').checked
+    && !document.querySelector('.job .overlap-separation').disabled`, '話者別音声分離を有効にする');
+  check(await run(`return document.querySelector('.job .overlap-separation').checked;`),
+    '話者別音声分離を明示的に有効化できる');
   await run(`document.querySelector('.job [data-preset="interview"]').click()`);
   check(await run(`const j=document.querySelector('.job');
     return j.querySelector('.overlap-aware').checked && !j.querySelector('.overlap-speakers').disabled

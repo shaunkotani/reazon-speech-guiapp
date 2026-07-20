@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "dataset": {
+    "name": "Japanese overlap example",
+    "language": "ja-JP",
+    "license": "replace-with-actual-license",
+    "consent": "replace-with-consent-status",
+    "annotationStatus": "provisional",
+    "purpose": "speech-separation-evaluation"
+  },
+  "recordings": [
+    {
+      "id": "meeting-example",
+      "audio": "../local/meeting-example.wav",
+      "cases": [
+        {
+          "id": "meeting-example-overlap-001",
+          "start": 10.2,
+          "end": 13.4,
+          "overlapStart": 11.1,
+          "overlapEnd": 12.3,
+          "annotationGranularity": "utterance",
+          "references": [
+            {
+              "speaker": "speaker-a",
+              "text": "それでは始めます"
+            },
+            {
+              "speaker": "speaker-b",
+              "text": "お願いします"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

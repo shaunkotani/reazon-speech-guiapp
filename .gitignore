@@ -12,6 +12,10 @@ models/
 # テスト用音声
 samples/
 
+# 音声分離のローカル評価データと詳細結果（参照文・仮説文を含む）
+evaluation/local/
+evaluation/results/
+
 # ffmpeg バイナリ（100MB超でGitHub上限を超える）。scripts/fetch-ffmpeg.js でビルド時に取得。
 # vendor 配下の説明テキスト(ffmpeg-build-info.txt 等)は追跡する。
 vendor/ffmpeg/**/ffmpeg

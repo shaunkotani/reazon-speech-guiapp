@@ -1052,6 +1052,11 @@ button:disabled { background: #9ca3af; cursor: default; }
   border: 1px solid var(--border); border-radius: 5px; background: #fff;
 }
 .overlap-speakers:disabled { opacity: .5; }
+.overlap-separation-row small {
+  padding: 1px 5px; border-radius: 999px; background: #ede9fe; color: #6d28d9;
+  font-size: 9px; font-weight: 700;
+}
+.separation-model-status { color: var(--muted); font-size: 10px; min-height: 14px; }
 .overlap-ctl .vad-ctl-help { flex-basis: 100%; margin-top: 0; }
 .vad-ctl { display: block; margin-bottom: 14px; }
 .vad-ctl-name { display: block; font-size: 12px; margin-bottom: 4px; }
@@ -1384,6 +1389,7 @@ button:disabled { background: #9ca3af; cursor: default; }
 .seg .ts { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; white-space: nowrap; padding-top: 2px; }
 .seg .txt { flex: 1; }
 .seg.overlap-recovered { background: #f0fdf4; }
+.seg.overlap-separated { background: #f5f3ff; }
 .seg.locked-correction { background: #f0fdf4; }
 .overlap-badge {
   align-self: flex-start; white-space: nowrap;

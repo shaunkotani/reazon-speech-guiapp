@@ -18,6 +18,10 @@
     ライセンス: Apache-2.0
     https://github.com/k2-fsa/sherpa-onnx
 
+- ONNX Runtime / onnxruntime-node   (Microsoft)
+    ライセンス: MIT
+    https://github.com/microsoft/onnxruntime
+
 - FFmpeg   (Windows x64 同梱バイナリ)
     ライセンス: LGPL v3（--enable-version3, GPL/nonfree 無効）
     別プロセスとして音声/動画のデコードにのみ使用。改変なしで再配布。
@@ -51,6 +55,12 @@
     ライセンス: MIT
     https://huggingface.co/pyannote/segmentation-3.0
     ONNX配布元: https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0
+
+- Conv-TasNet Libri2Mix 16kHz ONNX （2話者音声分離、任意ダウンロード）
+    ライセンス: CC-BY-SA-4.0
+    ONNX配布元: https://huggingface.co/welcomyou/convtasnet-libri2mix-16k-onnx
+    上流モデル: https://huggingface.co/JorisCos/ConvTasNet_Libri2Mix_sepclean_16k
+    アーキテクチャ: Conv-TasNet (Luo and Mesgarani, 2019)
 
 
 ■ ライセンス全文

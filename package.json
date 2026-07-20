@@ -1,6 +1,6 @@
 {
   "name": "reazonspeech",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "description": "ローカルで動作する日本語文字起こしアプリ（ReazonSpeech / sherpa-onnx）",
   "main": "src/main/main.js",
   "scripts": {
@@ -8,6 +8,13 @@
     "test:cli": "node scripts/test-pipeline.js",
     "test:overlap": "node scripts/test-overlap.js",
     "test:overlap-worker": "node scripts/test-overlap-worker.js",
+    "test:separation": "node scripts/test-separation.js",
+    "test:separation-worker": "node scripts/test-separation-worker.js",
+    "test:separation-evaluation": "node scripts/test-separation-evaluation.js",
+    "test:synthetic-overlap": "node scripts/test-synthetic-overlap.js",
+    "eval:separation:prepare": "node scripts/prepare-japanese-overlap-eval.js",
+    "eval:separation:synthesize": "node scripts/synthesize-japanese-overlap-eval.js",
+    "eval:separation": "node scripts/evaluate-japanese-overlap.js",
     "test:renderer": "electron scripts/test-renderer-playback.js",
     "test:progress": "node scripts/test-transcription-progress.js",
     "test:queue": "node scripts/test-serial-job-queue.js",
@@ -33,6 +40,7 @@
   "dependencies": {
     "electron-updater": "^6.8.9",
     "ffmpeg-static": "^5.3.0",
+    "onnxruntime-node": "1.21.1",
     "sherpa-onnx-node": "^1.13.3"
   },
   "optionalDependencies": {
@@ -77,10 +85,13 @@
     ],
     "asarUnpack": [
       "**/node_modules/ffmpeg-static/**",
+      "**/node_modules/onnxruntime-common/**",
+      "**/node_modules/onnxruntime-node/**",
       "**/node_modules/sherpa-onnx-node/**",
       "**/node_modules/sherpa-onnx-darwin-*/**",
       "**/node_modules/sherpa-onnx-win-*/**"
     ],
+    "afterPack": "scripts/prune-onnxruntime.js",
     "mac": {
       "target": [
         {

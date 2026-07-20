@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('api', {
   modelStatus: () => ipcRenderer.invoke('model:status'),
   downloadModel: () => ipcRenderer.invoke('model:download'),
   onModelProgress: (cb) => ipcRenderer.on('model:progress', (_e, p) => cb(p)),
+  separationModelStatus: () => ipcRenderer.invoke('model:separation-status'),
+  downloadSeparationModel: () => ipcRenderer.invoke('model:separation-download'),
+  onSeparationModelProgress: (cb) =>
+    ipcRenderer.on('model:separation-progress', (_e, p) => cb(p)),
 
   // 認識設定（辞書＋高精度モード） -> { text, score, enabled, highAccuracy } / 保存 -> { ok, count }
   getHotwords: () => ipcRenderer.invoke('hotwords:get'),
@@ -36,7 +40,7 @@ contextBridge.exposeInMainWorld('api', {
 
   // 文字起こし（opts: { denoiseStrength:0..1, diarize:bool, numSpeakers:int,
   //   vad:{ preset, threshold, minSilenceDuration, minSpeechDuration, maxSpeechDuration,
-  //         overlapAware, overlapSpeakers } }）
+  //         overlapAware, overlapSpeakers, overlapSeparation } }）
   transcribe: (filePath, jobId, opts) =>
     ipcRenderer.invoke('transcribe:file', filePath, jobId, opts),
   cancelTranscribe: (jobId) => ipcRenderer.invoke('transcribe:cancel', jobId),

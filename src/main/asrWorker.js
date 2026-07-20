@@ -355,6 +355,62 @@ const OPS = {
     return out;
   },
 
+  // 分離済みの各話者 PCM を VAD で細分化して認識する。
+  // 分離窓には前後文脈が入っているため、実際の重なり区間に接する発話だけを返す。
+  async processSeparatedBatch({ items, vad }, emit) {
+    const out = [];
+    const separatedVad = vadFor({
+      ...(vad || {}),
+      threshold: Math.min(0.5, Number(vad && vad.threshold) || 0.5),
+      minSpeechDuration: Math.min(0.12, Number(vad && vad.minSpeechDuration) || 0.12),
+      minSilenceDuration: Math.min(0.18, Number(vad && vad.minSilenceDuration) || 0.18),
+      maxSpeechDuration: Math.min(4, Number(vad && vad.maxSpeechDuration) || 4),
+    });
+    for (const item of (Array.isArray(items) ? items : [])) {
+      const samples = loadPcm(item.pcmPath);
+      const windowDuration = samples.length / core.SAMPLE_RATE;
+      const localOverlap = {
+        start: Math.max(0, Number(item.overlapStart) - Number(item.windowStart) - 0.15),
+        end: Math.min(windowDuration, Number(item.overlapEnd) - Number(item.windowStart) + 0.15),
+      };
+      let vadSegments = core.collectVadSegments(samples, separatedVad);
+      let parts = overlapTools.splitStrictSegments(vadSegments, 4)
+        .filter((segment) => Math.min(segment.end, localOverlap.end)
+          - Math.max(segment.start, localOverlap.start) >= 0.04);
+      // 分離アーティファクトで VAD が落ちても、重なり中心だけは1回試す。
+      if (!parts.length && localOverlap.end - localOverlap.start >= 0.25) {
+        parts = overlapTools.splitStrictSegments([localOverlap], 4);
+      }
+      const segments = [];
+      for (const part of parts) {
+        const a = Math.max(0, Math.round(part.start * core.SAMPLE_RATE));
+        const b = Math.min(samples.length, Math.round(part.end * core.SAMPLE_RATE));
+        const slice = samples.subarray(a, b);
+        const result = await core.recognizeSegment(ctx.recognizer, slice);
+        const text = String(result.text || '').trim();
+        if (!text) continue;
+        let embedding = null;
+        if (ctx.embedder && slice.length >= Math.round(0.3 * core.SAMPLE_RATE)) {
+          try { embedding = Array.from(core.extractEmbedding(ctx.embedder, slice)); }
+          catch (_) { embedding = null; }
+        }
+        segments.push({
+          start: Number(item.windowStart) + part.start,
+          end: Number(item.windowStart) + part.end,
+          text,
+          embedding,
+        });
+      }
+      out.push({
+        windowIndex: item.windowIndex,
+        stemIndex: item.stemIndex,
+        segments,
+      });
+      emit({ kind: 'separatedStem', n: 1, windowIndex: item.windowIndex, stemIndex: item.stemIndex });
+    }
+    return out;
+  },
+
   // プレビュー WAV 生成（先頭 maxSeconds 秒、必要ならノイズ除去）
   async preview({ filePath, outPath, denoiseStrength, maxSeconds }) {
     return core.renderPreviewWav(filePath, ctx, outPath, {

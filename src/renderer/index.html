@@ -285,6 +285,11 @@
                     <option value="4">4人</option>
                   </select>
                 </label>
+                <label class="chk overlap-separation-row">
+                  <input type="checkbox" class="overlap-separation" disabled />
+                  話者別に音声分離 <small>実験</small>
+                </label>
+                <span class="separation-model-status" role="status"></span>
                 <span class="vad-ctl-help">同時に話した部分を詳しく解析します。処理時間は長くなります。</span>
               </div>
               <label class="vad-ctl">
@@ -750,6 +755,9 @@
             <li><span class="oss-name">sherpa-onnx</span><span class="oss-lic">Apache-2.0</span><span
                 class="oss-acts"><button class="lic-btn" data-license="apache-2.0">全文</button><button class="lic-btn"
                   data-url="https://github.com/k2-fsa/sherpa-onnx">配布元</button></span></li>
+            <li><span class="oss-name">ONNX Runtime（音声分離）</span><span class="oss-lic">MIT</span><span
+                class="oss-acts"><button class="lic-btn" data-license="mit">全文</button><button class="lic-btn"
+                  data-url="https://github.com/microsoft/onnxruntime">配布元</button></span></li>
             <li><span class="oss-name">ReazonSpeech k2-v2（認識モデル）</span><span class="oss-lic">Apache-2.0</span><span
                 class="oss-acts"><button class="lic-btn"
                   data-url="https://huggingface.co/reazon-research/reazonspeech-k2-v2">配布元</button></span></li>
@@ -761,6 +769,9 @@
             <li><span class="oss-name">WeSpeaker ResNet34（話者埋め込み）</span><span class="oss-lic">上流準拠</span><span
                 class="oss-acts"><button class="lic-btn"
                   data-url="https://github.com/wenet-e2e/wespeaker">配布元</button></span></li>
+            <li><span class="oss-name">Conv-TasNet 16kHz（2話者音声分離）</span><span class="oss-lic">CC-BY-SA-4.0</span><span
+                class="oss-acts"><button class="lic-btn"
+                  data-url="https://huggingface.co/welcomyou/convtasnet-libri2mix-16k-onnx">配布元</button></span></li>
           </ul>
           <button class="lic-btn wide" data-license="notice">帰属表示（NOTICE）全文を表示</button>
 
