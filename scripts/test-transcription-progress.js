@@ -18,7 +18,7 @@ test('有効な設定だけを工程一覧へ含める', () => {
   assert.deepStrictEqual(progress.configuredPhases({
     denoiseStrength: 0.8, vad: { overlapAware: true },
   }), [
-    'queued', 'preparing', 'decoding', 'overlap', 'denoising', 'vad', 'recognizing', 'finalizing',
+    'queued', 'preparing', 'decoding', 'denoising', 'vad', 'overlap', 'recognizing', 'finalizing',
   ]);
 });
 
@@ -28,12 +28,17 @@ test('待機中はETAを出さず、遅延警告の対象にしない', () => {
   assert.strictEqual(progress.slowThresholdMs('queued'), Number.POSITIVE_INFINITY);
 });
 
-test('重なり解析中は推定不能と分かる表示にする', () => {
+test('重なり解析中もチャンク進捗から残り時間を出す', () => {
   const state = progress.createEtaState();
-  assert.strictEqual(progress.updateEta(state, { phase: 'overlap' }, 1000), '時間がかかります');
+  assert.strictEqual(progress.updateEta(state, {
+    phase: 'overlap', completedWorkSec: 0, totalWorkSec: 120,
+  }, 1000), '残り時間を計算中');
+  assert.strictEqual(progress.updateEta(state, {
+    phase: 'overlap', completedWorkSec: 60, totalWorkSec: 120,
+  }, 5000), '残り 約10秒未満');
   assert.strictEqual(progress.updateEta(state, {
     phase: 'overlap', skippingOverlap: true,
-  }, 2000), '通常の文字起こしへ切り替え中');
+  }, 6000), '通常の文字起こしへ切り替え中');
 });
 
 test('ETAは最初の有効な進捗から表示する', () => {

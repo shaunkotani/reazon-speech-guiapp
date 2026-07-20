@@ -22,9 +22,9 @@
       'queued',
       'preparing',
       'decoding',
-      ...(vad.overlapAware === true ? ['overlap'] : []),
       ...(Number(opts.denoiseStrength) > 0 ? ['denoising'] : []),
       'vad',
+      ...(vad.overlapAware === true ? ['overlap'] : []),
       'recognizing',
       'finalizing',
     ];
@@ -89,14 +89,12 @@
     if (!state || !status) return '';
     if (status.phase === 'queued') return '開始後に残り時間を計算';
     if (status.phase === 'finalizing') return 'まもなく完了';
-    if (status.phase === 'overlap') {
+    if (status.phase === 'overlap' && status.skippingOverlap) {
       state.phaseStartedAt = 0;
       state.smoothedRemaining = null;
-      return status.skippingOverlap
-        ? '通常の文字起こしへ切り替え中'
-        : '時間がかかります';
+      return '通常の文字起こしへ切り替え中';
     }
-    if (status.phase !== 'recognizing') {
+    if (!['overlap', 'recognizing'].includes(status.phase)) {
       state.phaseStartedAt = 0;
       state.smoothedRemaining = null;
       return '残り時間を計算中';

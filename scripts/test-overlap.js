@@ -23,6 +23,18 @@ function testOverlapDetection() {
   assert(Math.abs(hits[0].end - 3.37) < 1e-6);
 }
 
+function testDiarizationChunkPlanning() {
+  const chunks = overlap.buildDiarizationChunks(125, { chunkDuration: 60, context: 2 });
+  assert.deepStrictEqual(chunks, [
+    { index: 0, start: 0, end: 62, coreStart: 0, coreEnd: 60 },
+    { index: 1, start: 58, end: 122, coreStart: 60, coreEnd: 120 },
+    { index: 2, start: 118, end: 125, coreStart: 120, coreEnd: 125 },
+  ]);
+  assert.strictEqual(overlap.diarizationThreads(16, 4), 3);
+  assert.strictEqual(overlap.diarizationThreads(4, 3), 1);
+  assert.strictEqual(overlap.diarizationThreads(16, 1), 4);
+}
+
 function testCandidatePlanning() {
   const vad = [{ start: 2.47, end: 5.212 }];
   const speakers = [
@@ -32,6 +44,11 @@ function testCandidatePlanning() {
   const plan = overlap.buildRecognitionItems(vad, speakers, { enabled: true, maxDuration: 3 });
   assert.strictEqual(plan.overlapGroupCount, 1);
   assert(plan.items.some((x) => x.kind === 'repair' && x.speakerHint === 1));
+  const repairs = plan.items.filter((x) => x.kind === 'repair');
+  assert(repairs.filter((x) => x.variantTier === 'primary').length <= 6,
+    '各補正区間の初回候補は最大3件に絞る');
+  assert(repairs.some((x) => x.variantTier === 'extended'),
+    '合意が弱い場合にだけ使う追加候補を保持する');
 
   // 主話者区間が元 VAD と同じで、もう一方が短すぎる場合は正常結果を触らない。
   const harmless = overlap.buildRecognitionItems(
@@ -81,6 +98,19 @@ function testConsensusAndFinalize() {
   })));
   assert.strictEqual(selected.text, 'どうしようどうしよう');
 
+  const agreed = overlap.repairsNeedingExpansion([
+    { kind: 'repair', repairId: 'r0', variantTier: 'primary', text: '一致' },
+    { kind: 'repair', repairId: 'r0', variantTier: 'primary', text: '一致' },
+    { kind: 'repair', repairId: 'r0', variantTier: 'primary', text: '一到' },
+  ]);
+  assert.strictEqual(agreed.size, 0, '2票以上の合意があれば追加認識しない');
+  const disputed = overlap.repairsNeedingExpansion([
+    { kind: 'repair', repairId: 'r1', variantTier: 'primary', text: '候補A' },
+    { kind: 'repair', repairId: 'r1', variantTier: 'primary', text: '候補B' },
+    { kind: 'repair', repairId: 'r1', variantTier: 'primary', text: '候補C' },
+  ]);
+  assert(disputed.has('r1'), '候補が割れた時だけ追加認識する');
+
   const recognized = [
     { kind: 'base', groupId: 'g0', chainId: 'v0', start: 2.47, end: 5.212, text: 'ありがとうございます' },
     // 短い側は相対長フィルタで落ちる。
@@ -100,6 +130,7 @@ function testConsensusAndFinalize() {
 
 testStrictSplit();
 testOverlapDetection();
+testDiarizationChunkPlanning();
 testCandidatePlanning();
 testConsensusAndFinalize();
 console.log('overlap tests: OK');

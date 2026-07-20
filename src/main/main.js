@@ -40,6 +40,9 @@ const cancelled = new Set(); // 中止された jobId
 const skipOverlapRequested = new Set(); // 重なり解析を中断し、通常解析へ切り替える jobId
 const activeTranscriptionPhases = new Map(); // 実行中ジョブの工程（スキップ可否の判定用）
 const jobEmbeddings = new Map(); // jobId -> number[][]（区間順、手本ベース再識別用）
+const overlapAnalysisCache = new Map(); // 同じ原音・範囲・話者数の再解析を省略するLRU
+const OVERLAP_CACHE_LIMIT = 12;
+const OVERLAP_CACHE_VERSION = 2;
 
 function cacheEmbeddings(jobId, embs) {
   jobEmbeddings.set(jobId, embs);
@@ -240,6 +243,80 @@ function setWindowProgress(progress, options) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   try { mainWindow.setProgressBar(progress, options); }
   catch (_) { /* OS側の進捗表示に失敗しても文字起こしは継続する */ }
+}
+
+function overlapCacheKey(filePath, range, numSpeakers) {
+  const source = fs.statSync(filePath);
+  const { baseDir } = resolveModels();
+  const modelPaths = modelManager.pathsFor(baseDir);
+  const modelStats = [modelPaths.segmentationPath, modelPaths.embPath].map((p) => {
+    try {
+      const stat = fs.statSync(p);
+      return [p, stat.size, Math.trunc(stat.mtimeMs)];
+    } catch (_) {
+      return [p, 0, 0];
+    }
+  });
+  return JSON.stringify({
+    version: OVERLAP_CACHE_VERSION,
+    filePath: path.resolve(filePath),
+    size: source.size,
+    mtimeMs: Math.trunc(source.mtimeMs),
+    range: range || null,
+    numSpeakers,
+    modelStats,
+  });
+}
+
+function readOverlapCache(key) {
+  const value = overlapAnalysisCache.get(key);
+  if (!value) return null;
+  overlapAnalysisCache.delete(key);
+  overlapAnalysisCache.set(key, value);
+  return value.map((segment) => ({ ...segment }));
+}
+
+function writeOverlapCache(key, segments) {
+  overlapAnalysisCache.delete(key);
+  overlapAnalysisCache.set(key, segments.map((segment) => ({ ...segment })));
+  while (overlapAnalysisCache.size > OVERLAP_CACHE_LIMIT) {
+    overlapAnalysisCache.delete(overlapAnalysisCache.keys().next().value);
+  }
+}
+
+async function analyzeOverlapInParallel({
+  pcmPath, duration, numSpeakers, sendStatus,
+}) {
+  const chunks = overlapTools.buildDiarizationChunks(duration);
+  if (!chunks.length) return [];
+  const workers = Math.min(pool.length, chunks.length);
+  const numThreads = overlapTools.diarizationThreads(os.cpus().length || 1, workers);
+  const batches = Array.from({ length: workers }, () => []);
+  chunks.forEach((chunk, index) => batches[index % workers].push(chunk));
+  let completed = 0;
+  let completedWorkSec = 0;
+  sendStatus({
+    phase: 'overlap', completed: 0, total: chunks.length,
+    completedWorkSec: 0, totalWorkSec: duration,
+    totalAudioSec: duration, ratio: 0,
+  });
+  const results = await Promise.all(batches.map((items, workerIndex) => rpc(
+    pool[workerIndex],
+    'diarizeBatch',
+    { pcmPath, items, numSpeakers, numThreads },
+    (event) => {
+      if (event.kind !== 'overlapChunk') return;
+      completed += event.n || 1;
+      completedWorkSec += Math.max(0, Number(event.workSec) || 0);
+      sendStatus({
+        phase: 'overlap', completed, total: chunks.length,
+        completedWorkSec, totalWorkSec: duration,
+        totalAudioSec: duration,
+        ratio: duration > 0 ? Math.min(1, completedWorkSec / duration) : completed / chunks.length,
+      });
+    },
+  )));
+  return results.flat().sort((a, b) => a.start - b.start || a.end - b.end);
 }
 
 function updateTaskbarProgress(status) {
@@ -562,8 +639,8 @@ ipcMain.handle('transcribe:skip-overlap', (event, jobId) => {
   deliverTranscribeStatus(event.sender, jobId, {
     state: 'running', phase: 'overlap', skippingOverlap: true,
   });
-  // diarizer.process は途中経過や個別の中断APIを持たないため、ワーカーを停止する。
-  // performTranscription 側で重なり解析を無効にして前処理から安全に再開する。
+  // 個々の diarizer.process は途中で止められないためプールを停止する。
+  // デコード済みPCMは残し、performTranscription が新しいプールで通常ASRだけを続ける。
   destroyPool();
   return true;
 });
@@ -697,6 +774,7 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
   const publicJobId = execution.jobId == null ? runId : execution.jobId;
   const safeRunId = String(runId).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
   const pcmPath = path.join(previewDir, `work-${safeRunId}-${Date.now()}.pcm`);
+  const rawPcmPath = path.join(previewDir, `work-${safeRunId}-${Date.now()}-raw.pcm`);
   const delivery = {
     channel: execution.statusChannel || 'transcribe:status',
     taskbar: execution.taskbar !== false,
@@ -730,7 +808,8 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
     await ensurePool();
     checkCancel(runId);
     fs.mkdirSync(previewDir, { recursive: true });
-    // Stage A: 1 ワーカーでデコード+重なり検出+ノイズ除去+VAD → 共有 PCM と区間境界
+    // Stage A: デコード+ノイズ除去+VADを行い、原音の重なり解析は別工程で
+    // 120秒チャンクへ分けてワーカープール全体に並列化する。
     sendProgress(0.02);
     const vadOpts = opts.vad || {};
     const trialRange = opts.range ? rangeTools.normalizeTrialRange(opts.range) : null;
@@ -739,36 +818,69 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
       numSpeakers: Number.isInteger(vadOpts.overlapSpeakers)
         ? Math.min(4, Math.max(2, vadOpts.overlapSpeakers)) : 2,
     };
+    const denoiseStrength = Number(opts.denoiseStrength) || 0;
+    const overlapPcmPath = overlapOpts.enabled && denoiseStrength > 0 ? rawPcmPath : pcmPath;
     const prepareAudio = () => rpc(pool[0], 'prepare', {
       filePath, denoiseStrength: opts.denoiseStrength || 0, outPath: pcmPath,
+      rawOutPath: overlapPcmPath === rawPcmPath ? rawPcmPath : null,
       vad: vadOpts, // 発話検出の設定（未指定なら core の標準値）
-      overlap: overlapOpts,
+      // 重なり解析は下でチャンク並列化する。prepare 内の旧経路は互換用に残す。
+      overlap: { enabled: false },
       range: trialRange,
     }, (ev) => {
       if (ev.kind === 'phase') {
         sendStatus({ phase: ev.phase, totalAudioSec: ev.totalAudioSec || 0 });
       }
     });
-    let prep;
+    const prep = await prepareAudio();
     let overlapSkipped = false;
-    try {
-      prep = await prepareAudio();
-    } catch (error) {
-      // スキップ操作でワーカーを終了した場合だけ、通常解析として再開する。
-      if (!skipOverlapRequested.has(runId)) throw error;
-    }
-    if (skipOverlapRequested.delete(runId)) {
-      overlapSkipped = true;
-      overlapOpts.enabled = false;
-      sendStatus({ phase: 'preparing', skippingOverlap: true });
-      checkCancel(runId);
-      await ensurePool();
-      checkCancel(runId);
-      prep = await prepareAudio();
-      sendStatus({
-        state: 'warning',
-        warning: '重なり音声の解析をスキップし、通常の文字起こしを続けています。',
-      });
+    let overlapCached = false;
+    prep.speakerSegments = [];
+    prep.overlapError = '';
+    if (overlapOpts.enabled) {
+      const cacheKey = overlapCacheKey(filePath, trialRange, overlapOpts.numSpeakers);
+      const cached = readOverlapCache(cacheKey);
+      if (cached) {
+        prep.speakerSegments = cached;
+        overlapCached = true;
+        sendStatus({
+          phase: 'overlap', completed: 1, total: 1, ratio: 1,
+          totalAudioSec: prep.duration, cached: true,
+        });
+      } else {
+        let analysisError = null;
+        try {
+          prep.speakerSegments = await analyzeOverlapInParallel({
+            pcmPath: overlapPcmPath,
+            duration: prep.duration,
+            numSpeakers: overlapOpts.numSpeakers,
+            sendStatus,
+          });
+        } catch (error) {
+          analysisError = error;
+        }
+        if (skipOverlapRequested.delete(runId)) {
+          overlapSkipped = true;
+          overlapOpts.enabled = false;
+          prep.speakerSegments = [];
+          sendStatus({ phase: 'preparing', skippingOverlap: true });
+          if (cancelled.has(runId)) checkCancel(runId);
+          await ensurePool();
+          sendStatus({
+            state: 'warning',
+            warning: '重なり音声の解析をスキップし、通常の文字起こしを続けています。',
+          });
+        } else if (analysisError) {
+          if (cancelled.has(runId)) checkCancel(runId);
+          prep.overlapError = analysisError.message || String(analysisError);
+          if (/ワーカーが終了/.test(prep.overlapError)) {
+            destroyPool();
+            await ensurePool();
+          }
+        } else {
+          writeOverlapCache(cacheKey, prep.speakerSegments);
+        }
+      }
     }
     checkCancel(runId);
     const maxDuration = (typeof vadOpts.maxSpeechDuration === 'number' && isFinite(vadOpts.maxSpeechDuration))
@@ -787,8 +899,10 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
       { enabled: overlapOpts.enabled, maxDuration },
     );
     const segs = recognitionPlan.items;
-    const total = segs.length;
-    const totalWorkSec = segs.reduce((sum, s) => sum + Math.max(0, s.end - s.start), 0);
+    const plannedTotal = segs.length;
+    const plannedWorkSec = segs.reduce(
+      (sum, item) => sum + Math.max(0, item.end - item.start), 0,
+    );
     const reportedDuration = prep.range ? prep.range.actualDurationSeconds : prep.duration;
     const resultRange = prep.range ? {
       startSeconds: prep.range.startSeconds,
@@ -804,7 +918,7 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
         totalAudioSec: reportedDuration,
       });
     }
-    if (total === 0) {
+    if (plannedTotal === 0) {
       sendStatus({ phase: 'finalizing', totalAudioSec: reportedDuration });
       sendStatus({ state: 'completed', phase: 'finalizing', ratio: 1, totalAudioSec: reportedDuration });
       sendProgress(1);
@@ -814,49 +928,88 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
       };
     }
 
-    // Stage B: 区間をプールにラウンドロビン分配し、ASR を並列実行（埋め込みは後付け）
-    const batches = Array.from({ length: pool.length }, () => []);
-    segs.forEach((s, idx) => batches[idx % pool.length].push({ idx, start: s.start, end: s.end }));
+    // Stage B: base と primary（最大3候補）を先に認識し、候補が割れた
+    // repairId だけ extended 候補を追加する。
     let done = 0;
     let completedWorkSec = 0;
-    const partial = new Array(total);
-    sendStatus({
-      phase: 'recognizing', completed: 0, total,
-      completedWorkSec: 0, totalWorkSec, totalAudioSec: reportedDuration, ratio: 0,
+    const partial = new Array(plannedTotal);
+    const initialIndexes = [];
+    const extendedIndexes = [];
+    segs.forEach((item, index) => {
+      if (item.kind === 'repair' && item.variantTier === 'extended') extendedIndexes.push(index);
+      else initialIndexes.push(index);
     });
-    await Promise.all(batches.map((items, w) => {
-      if (!items.length) return null;
-      return rpc(pool[w], 'processBatch', { pcmPath, items, wantEmbedding: false }, (ev) => {
-        if (ev.kind === 'seg') {
-          done += ev.n;
-          completedWorkSec += Math.max(0, Number(ev.workSec) || 0);
-          const ratio = totalWorkSec > 0 ? Math.min(1, completedWorkSec / totalWorkSec) : done / total;
-          const item = segs[ev.idx];
-          if (item) partial[ev.idx] = { ...item, text: ev.text || '' };
-          const partialUpdate = item && item.kind === 'base' && String(ev.text || '').trim()
+    let scheduledTotal = initialIndexes.length;
+    let scheduledWorkSec = initialIndexes.reduce(
+      (sum, index) => sum + Math.max(0, segs[index].end - segs[index].start), 0,
+    );
+
+    const recognizeIndexes = async (indexes) => {
+      const batches = Array.from({ length: pool.length }, () => []);
+      indexes.forEach((index, order) => {
+        const item = segs[index];
+        batches[order % pool.length].push({ idx: index, start: item.start, end: item.end });
+      });
+      sendStatus({
+        phase: 'recognizing', completed: done, total: plannedTotal,
+        completedWorkSec, totalWorkSec: plannedWorkSec,
+        totalAudioSec: reportedDuration,
+        ratio: plannedWorkSec > 0 ? Math.min(1, completedWorkSec / plannedWorkSec) : 0,
+      });
+      await Promise.all(batches.map((items, workerIndex) => {
+        if (!items.length) return null;
+        return rpc(pool[workerIndex], 'processBatch', {
+          pcmPath, items, wantEmbedding: false,
+        }, (event) => {
+          if (event.kind !== 'seg') return;
+          done += event.n;
+          completedWorkSec += Math.max(0, Number(event.workSec) || 0);
+          const ratio = plannedWorkSec > 0
+            ? Math.min(1, completedWorkSec / plannedWorkSec) : done / plannedTotal;
+          const item = segs[event.idx];
+          if (item) partial[event.idx] = { ...item, text: event.text || '' };
+          const partialUpdate = item && item.kind === 'base' && String(event.text || '').trim()
             ? {
-              index: ev.idx,
+              index: event.idx,
               start: item.start + sourceOffsetSeconds,
               end: item.end + sourceOffsetSeconds,
-              text: String(ev.text).trim(),
+              text: String(event.text).trim(),
             }
             : null;
           sendStatus({
-            phase: 'recognizing', completed: done, total,
-            completedWorkSec, totalWorkSec, totalAudioSec: reportedDuration, ratio,
+            phase: 'recognizing', completed: done, total: plannedTotal,
+            completedWorkSec, totalWorkSec: plannedWorkSec,
+            totalAudioSec: reportedDuration, ratio,
             partial: partialUpdate,
           });
           sendProgress(0.05 + 0.9 * ratio);
-        }
-      }).then((res) => {
-        for (const r of res) partial[r.idx] = { ...segs[r.idx], text: r.text };
-      });
-    }));
+        }).then((results) => {
+          for (const result of results) {
+            partial[result.idx] = { ...segs[result.idx], text: result.text };
+          }
+        });
+      }));
+    };
+
+    await recognizeIndexes(initialIndexes);
+    checkCancel(runId);
+    const expandRepairs = overlapTools.repairsNeedingExpansion(partial.filter(Boolean));
+    const selectedExtendedIndexes = extendedIndexes.filter(
+      (index) => expandRepairs.has(segs[index].repairId),
+    );
+    if (selectedExtendedIndexes.length) {
+      scheduledTotal += selectedExtendedIndexes.length;
+      scheduledWorkSec += selectedExtendedIndexes.reduce(
+        (sum, index) => sum + Math.max(0, segs[index].end - segs[index].start), 0,
+      );
+      await recognizeIndexes(selectedExtendedIndexes);
+    }
     checkCancel(runId);
 
     sendStatus({
-      phase: 'finalizing', completed: total, total,
-      completedWorkSec: totalWorkSec, totalWorkSec, totalAudioSec: reportedDuration,
+      phase: 'finalizing', completed: done, total: scheduledTotal,
+      completedWorkSec: scheduledWorkSec, totalWorkSec: scheduledWorkSec,
+      totalAudioSec: reportedDuration,
     });
     const finalized = overlapTools.finalizeRecognition(partial.filter(Boolean));
     const selected = prep.range
@@ -877,8 +1030,11 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
       overlap: {
         enabled: overlapOpts.enabled,
         skipped: overlapSkipped,
+        cached: overlapCached,
         detected: recognitionPlan.overlapIntervals.length,
         recovered: finalized.recoveredGroups,
+        candidatesRecognized: done,
+        candidatesPlanned: plannedTotal,
         error: prep.overlapError || '',
       },
       filePath, name: path.basename(filePath), jobId: publicJobId,
@@ -893,6 +1049,7 @@ async function performTranscription(sender, filePath, runId, opts = {}, executio
     skipOverlapRequested.delete(runId);
     activeTranscriptionPhases.delete(runId);
     fs.rm(pcmPath, { force: true }, () => {});
+    fs.rm(rawPcmPath, { force: true }, () => {});
   }
 }
 

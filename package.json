@@ -1,12 +1,13 @@
 {
   "name": "reazonspeech",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "description": "ローカルで動作する日本語文字起こしアプリ（ReazonSpeech / sherpa-onnx）",
   "main": "src/main/main.js",
   "scripts": {
     "start": "electron .",
     "test:cli": "node scripts/test-pipeline.js",
     "test:overlap": "node scripts/test-overlap.js",
+    "test:overlap-worker": "node scripts/test-overlap-worker.js",
     "test:renderer": "electron scripts/test-renderer-playback.js",
     "test:progress": "node scripts/test-transcription-progress.js",
     "test:queue": "node scripts/test-serial-job-queue.js",

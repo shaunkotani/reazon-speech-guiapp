@@ -723,10 +723,10 @@ async function main() {
   await waitFor(`document.querySelector('.job .progress-stage').textContent.includes('重なり音声')`,
     '重なり音声の解析工程が表示される');
   check(await run(`const j=document.querySelector('.job');
-    return j.querySelector('.eta').textContent === '時間がかかります'
+    return j.querySelector('.eta').textContent === '残り時間を計算中'
       && !j.querySelector('.skip-overlap-btn').classList.contains('hidden')
       && !j.querySelector('.skip-overlap-btn').disabled;`),
-    '重なり解析は時間がかかる旨とスキップ操作を表示する');
+    '重なり解析の残り時間とスキップ操作を表示する');
   await run(`document.querySelector('.job .skip-overlap-btn').click()`);
   check(await run(`const j=document.querySelector('.job');
     return j.querySelector('.eta').textContent.includes('切り替え中')

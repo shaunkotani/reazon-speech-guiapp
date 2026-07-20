@@ -10,9 +10,47 @@ const DEFAULTS = {
   startOffsets: [0, 0.08, 0.16],
   endTrims: [0, 0.5, 0.75],
   minVariantDuration: 0.45,
+  // 60秒では話者クラスタリングの文脈不足で短い重なりを落とす実音声があった。
+  // 120秒＋前後5秒なら全体解析と同じ重なり区間を保ちつつ、長尺を並列化できる。
+  diarizationChunkDuration: 120,
+  diarizationContext: 5,
 };
 
 const roundTime = (n) => Math.round(n * 1000000) / 1000000;
+
+/**
+ * 長尺の話者解析を並列化するため、重ならない採用範囲(core)と前後文脈を持つ
+ * チャンクへ分ける。隣接チャンクの解析結果は core で切るため二重計上しない。
+ */
+function buildDiarizationChunks(duration, opts = {}) {
+  const total = Math.max(0, Number(duration) || 0);
+  if (total <= 0) return [];
+  const chunkDuration = Math.max(10,
+    Number(opts.chunkDuration) || DEFAULTS.diarizationChunkDuration);
+  const requestedContext = Number(opts.context);
+  const context = Math.max(0, Math.min(chunkDuration / 4,
+    Number.isFinite(requestedContext) ? requestedContext : DEFAULTS.diarizationContext));
+  const chunks = [];
+  for (let coreStart = 0, index = 0; coreStart < total; coreStart += chunkDuration, index++) {
+    const coreEnd = Math.min(total, coreStart + chunkDuration);
+    chunks.push({
+      index,
+      start: roundTime(Math.max(0, coreStart - context)),
+      end: roundTime(Math.min(total, coreEnd + context)),
+      coreStart: roundTime(coreStart),
+      coreEnd: roundTime(coreEnd),
+    });
+  }
+  return chunks;
+}
+
+/** 全ワーカー合計でCPUを使い切らない範囲のONNXスレッド数。 */
+function diarizationThreads(logicalCpuCount, workerCount) {
+  const cpus = Math.max(1, Math.floor(Number(logicalCpuCount) || 1));
+  const workers = Math.max(1, Math.floor(Number(workerCount) || 1));
+  const budget = Math.max(1, cpus - 2);
+  return Math.max(1, Math.min(4, Math.floor(budget / workers)));
+}
 
 function intervalIntersection(a, b) {
   const start = Math.max(a.start, b.start);
@@ -142,23 +180,34 @@ function buildRecognitionItems(vadSegments, speakerSegments, opts = {}) {
       for (const part of repairParts) {
         const repairId = `r${repairSeq++}`;
         const repairSpanDuration = part.end - part.start;
-        let variantsForRepair = 0;
+        const variants = [];
         for (const startOffset of cfg.startOffsets) {
           for (const endTrim of cfg.endTrims) {
             const start = part.start + startOffset;
             const end = part.end - endTrim;
             if (end - start < cfg.minVariantDuration) continue;
-            items.push({
+            variants.push({
               start: roundTime(start), end: roundTime(end),
               kind: 'repair', groupId, chainId,
               repairId, variantId: `${startOffset}:${endTrim}`,
               speakerHint: track.speaker,
               repairSpanDuration,
             });
-            variantsForRepair++;
           }
         }
-        if (variantsForRepair) repairsForGroup++;
+        // まず「広い・中間・狭い」の最大3候補だけを認識する。3候補で
+        // 合意できない repair だけ、main が extended 候補を追加認識する。
+        const primaryIndexes = new Set();
+        if (variants.length) {
+          primaryIndexes.add(0);
+          primaryIndexes.add(Math.floor((variants.length - 1) / 2));
+          primaryIndexes.add(variants.length - 1);
+        }
+        variants.forEach((variant, index) => items.push({
+          ...variant,
+          variantTier: primaryIndexes.has(index) ? 'primary' : 'extended',
+        }));
+        if (variants.length) repairsForGroup++;
       }
     }
     if (repairsForGroup) overlapGroupCount++;
@@ -216,6 +265,28 @@ function selectConsensus(candidates) {
     }
   }
   return best;
+}
+
+/**
+ * primary 3候補で十分な合意が得られなかった repairId を返す。
+ * 空認識も追加候補を試す価値があるため展開対象にする。
+ */
+function repairsNeedingExpansion(recognizedItems, opts = {}) {
+  const minConsensus = Number.isFinite(opts.minConsensus) ? opts.minConsensus : 0.55;
+  const groups = new Map();
+  for (const item of recognizedItems || []) {
+    if (item.kind !== 'repair' || !item.repairId || item.variantTier === 'extended') continue;
+    if (!groups.has(item.repairId)) groups.set(item.repairId, []);
+    groups.get(item.repairId).push(item);
+  }
+  const out = new Set();
+  for (const [repairId, entries] of groups) {
+    const selected = selectConsensus(entries);
+    if (!selected || selected.consensus < minConsensus || selected.exactVotes < 2) {
+      out.add(repairId);
+    }
+  }
+  return out;
 }
 
 function trimRepeatedPrefix(previous, current) {
@@ -303,10 +374,13 @@ function finalizeRecognition(recognizedItems, opts = {}) {
 
 module.exports = {
   DEFAULTS,
+  buildDiarizationChunks,
+  diarizationThreads,
   splitStrictSegments,
   detectOverlapIntervals,
   buildRecognitionItems,
   levenshtein,
   selectConsensus,
+  repairsNeedingExpansion,
   finalizeRecognition,
 };

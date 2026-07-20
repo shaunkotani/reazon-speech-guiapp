@@ -3130,7 +3130,7 @@ function updateProgressClock(job) {
     `${current && current.state === 'queued' ? '待機' : '経過'} ${transcriptionProgress.formatElapsed((now - job.progressStartedAt) / 1000)}`;
 
   if (!current || current.state === 'cancelling') return;
-  if (current.phase === 'recognizing' || current.phase === 'finalizing') {
+  if (current.phase === 'overlap' || current.phase === 'recognizing' || current.phase === 'finalizing') {
     job.el.querySelector('.eta').textContent = transcriptionProgress.updateEta(job.etaState, current, now);
   }
   const threshold = transcriptionProgress.slowThresholdMs(current.phase, current.totalAudioSec);
@@ -3212,10 +3212,12 @@ function applyTranscribeStatus(jobId, incoming) {
   const count = wrap.querySelector('.progress-count');
   if (progress.state === 'queued') {
     count.textContent = `${progress.queuePosition || 1} / ${progress.queueTotal || 1}件`;
-  } else if (progress.phase === 'recognizing' && Number(progress.total) > 0) {
+  } else if ((progress.phase === 'overlap' || progress.phase === 'recognizing')
+    && Number(progress.total) > 0) {
     const done = Math.min(Number(progress.total), Math.max(0, Number(progress.completed) || 0));
     const ratio = isFinite(Number(progress.ratio)) ? Math.max(0, Math.min(1, Number(progress.ratio))) : done / progress.total;
-    count.textContent = `${done} / ${progress.total}区間（${Math.round(ratio * 100)}%）`;
+    const unit = progress.phase === 'overlap' ? 'チャンク' : '区間';
+    count.textContent = `${done} / ${progress.total}${unit}（${Math.round(ratio * 100)}%）`;
   } else {
     count.textContent = '';
   }
@@ -3223,7 +3225,7 @@ function applyTranscribeStatus(jobId, incoming) {
   const bar = wrap.querySelector('.bar');
   const progressBar = bar.parentElement;
   const ratio = Number(progress.ratio);
-  if (progress.phase === 'recognizing' && isFinite(ratio)) {
+  if ((progress.phase === 'overlap' || progress.phase === 'recognizing') && isFinite(ratio)) {
     const percent = Math.round(Math.max(0, Math.min(1, ratio)) * 100);
     bar.classList.remove('is-indeterminate');
     bar.style.width = `${percent}%`;

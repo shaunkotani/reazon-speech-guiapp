@@ -6,6 +6,7 @@
 // 汎用 RPC: メインから {type:'request', rid, op, args} を受け、処理中は
 // {type:'event', rid, ...} を送り、完了で {type:'response', rid, result} を返す。
 const fs = require('fs');
+const os = require('os');
 const core = require('../core/asr');
 const overlapTools = require('../shared/overlap');
 const rangeTools = require('../shared/transcriptionRange');
@@ -51,12 +52,16 @@ function loadPcm(pcmPath) {
 
 // pyannote は会話向けジョブでだけ使う。全プールで常時ロードするとメモリを
 // 余分に消費するため、prepare を担当したワーカーに遅延生成する。
-function diarizerFor(numSpeakers) {
+function diarizerFor(numSpeakers, numThreads = Math.min(4, Math.max(1, (os.cpus().length || 2) - 1))) {
   if (!ctx.segmentationPath || !ctx.embPath) return null;
   const n = Number.isInteger(numSpeakers) ? Math.min(4, Math.max(2, numSpeakers)) : 2;
-  const key = String(n);
+  const threads = Number.isInteger(numThreads) ? Math.min(4, Math.max(1, numThreads)) : 1;
+  const key = `${n}:${threads}`;
   if (!ctx.diarizer || ctx.diarizerKey !== key) {
-    ctx.diarizer = core.createSpeakerDiarizer(ctx.segmentationPath, ctx.embPath, { numSpeakers: n });
+    ctx.diarizer = core.createSpeakerDiarizer(ctx.segmentationPath, ctx.embPath, {
+      numSpeakers: n,
+      numThreads: threads,
+    });
     ctx.diarizerKey = key;
   }
   return ctx.diarizer;
@@ -226,7 +231,7 @@ const OPS = {
   },
 
   // 原音で重なり検出 → ノイズ除去 → 共有 PCM 保存 → VAD/話者区間境界を返す
-  async prepare({ filePath, denoiseStrength, outPath, vad, overlap, range }, emit) {
+  async prepare({ filePath, denoiseStrength, outPath, rawOutPath, vad, overlap, range }, emit) {
     emit({ kind: 'phase', phase: 'decoding' });
     const decodeWindow = range ? rangeTools.buildDecodeWindow(range) : null;
     const rawSamples = await core.decodeToPcm(filePath, decodeWindow ? {
@@ -257,7 +262,7 @@ const OPS = {
     if (overlap && overlap.enabled) {
       emit({ kind: 'phase', phase: 'overlap', totalAudioSec });
       try {
-        const diarizer = diarizerFor(overlap.numSpeakers);
+        const diarizer = diarizerFor(overlap.numSpeakers, overlap.numThreads);
         if (diarizer) {
           speakerSegments = diarizer.process(rawSamples).map((s) => ({
             start: s.start, end: s.end, speaker: s.speaker,
@@ -269,6 +274,7 @@ const OPS = {
       }
     }
 
+    if (rawOutPath && rawOutPath !== outPath) core.writePcmRaw(rawSamples, rawOutPath);
     let samples = rawSamples;
     if (ctx.denoiser && denoiseStrength > 0) {
       emit({ kind: 'phase', phase: 'denoising', totalAudioSec });
@@ -287,6 +293,41 @@ const OPS = {
       range: selectedRange,
       sourceOffsetSeconds: decodeWindow ? decodeWindow.decodeStartSeconds : 0,
     };
+  },
+
+  // 長尺の重なり検出用。各ワーカーは担当チャンクだけをファイルから読み、
+  // 前後文脈を含めて話者解析した後、重ならない core 範囲だけを返す。
+  async diarizeBatch({ pcmPath, items, numSpeakers, numThreads }, emit) {
+    const diarizer = diarizerFor(numSpeakers, numThreads);
+    if (!diarizer) throw new Error('重なり検出モデルが見つかりません');
+    const sr = core.SAMPLE_RATE;
+    const out = [];
+    for (const item of (Array.isArray(items) ? items : [])) {
+      const startSample = Math.max(0, Math.round(Number(item.start) * sr));
+      const endSample = Math.max(startSample, Math.round(Number(item.end) * sr));
+      const samples = core.readPcmRawRange(pcmPath, startSample, endSample);
+      const tracks = diarizer.process(samples);
+      const coreStart = Number(item.coreStart);
+      const coreEnd = Number(item.coreEnd);
+      for (const track of tracks) {
+        const start = Math.max(coreStart, Number(item.start) + Number(track.start));
+        const end = Math.min(coreEnd, Number(item.start) + Number(track.end));
+        if (end - start < 0.01) continue;
+        out.push({
+          start,
+          end,
+          // チャンク間でクラスタ番号の意味は共有されないため名前空間を分ける。
+          speaker: `${item.index}:${track.speaker}`,
+        });
+      }
+      emit({
+        kind: 'overlapChunk',
+        n: 1,
+        index: item.index,
+        workSec: Math.max(0, Number(item.coreEnd) - Number(item.coreStart)),
+      });
+    }
+    return out;
   },
 
   // 割り当てられた区間を認識（＋必要なら埋め込み抽出）。区間ごとに進捗イベント。

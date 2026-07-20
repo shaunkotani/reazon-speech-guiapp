@@ -202,6 +202,31 @@ function readPcmRaw(p) {
   return out;
 }
 
+/** raw float32 PCM の指定サンプル範囲だけを読む（長尺の並列前処理用）。 */
+function readPcmRawRange(p, startSample, endSample) {
+  const fileSamples = Math.floor(fs.statSync(p).size / 4);
+  const start = Math.max(0, Math.min(fileSamples, Math.floor(Number(startSample) || 0)));
+  const end = Math.max(start, Math.min(fileSamples, Math.floor(Number(endSample) || fileSamples)));
+  const bytes = (end - start) * 4;
+  if (bytes <= 0) return new Float32Array(0);
+  const buf = Buffer.allocUnsafe(bytes);
+  const fd = fs.openSync(p, 'r');
+  let offset = 0;
+  try {
+    while (offset < bytes) {
+      const n = fs.readSync(fd, buf, offset, bytes - offset, start * 4 + offset);
+      if (n <= 0) break;
+      offset += n;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  const count = Math.floor(offset / 4);
+  const out = new Float32Array(count);
+  for (let i = 0; i < count; i++) out[i] = buf.readFloatLE(i * 4);
+  return out;
+}
+
 /**
  * raw float32 PCM ファイルを 16bit PCM WAV へ変換する（リアルタイム録音の保存用）。
  * 録音は長時間になり得るため、全体をメモリへ載せずチャンク単位で変換する。
@@ -545,6 +570,7 @@ module.exports = {
   recognizeSegment,
   writePcmRaw,
   readPcmRaw,
+  readPcmRawRange,
   convertPcmFileToWav,
   denoisePcm,
   writePcmToWav,

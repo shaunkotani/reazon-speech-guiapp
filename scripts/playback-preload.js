@@ -103,9 +103,12 @@ contextBridge.exposeInMainWorld('api', {
       transcribeStatusListener({ jobId, state: 'error', phase: 'decoding', error });
       throw new Error(error.technical);
     }
-    transcribeStatusListener({ jobId, state: 'running', phase: 'overlap', totalAudioSec: RESULT.duration });
-    for (let waited = 0; waited < 300 && !overlapSkipRequested; waited += 10) await pause(10);
     transcribeStatusListener({ jobId, state: 'running', phase: 'vad', totalAudioSec: RESULT.duration });
+    transcribeStatusListener({
+      jobId, state: 'running', phase: 'overlap', completed: 0, total: 1,
+      completedWorkSec: 0, totalWorkSec: RESULT.duration, totalAudioSec: RESULT.duration,
+    });
+    for (let waited = 0; waited < 300 && !overlapSkipRequested; waited += 10) await pause(10);
     await pause(20);
     transcribeStatusListener({
       jobId, state: 'running', phase: 'recognizing', completed: 0, total: 3,
