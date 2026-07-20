@@ -141,15 +141,26 @@ async function main() {
   await waitFor(`document.querySelector('.job .audio-original').readyState >= 1`,
     '元音声プレビューのメタデータが読み込まれる');
   check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.job-setup').classList.contains('hidden')
+      && !j.querySelector('.job-card-summary').classList.contains('hidden')
+      && j.querySelector('.workspace-open-btn').textContent === '文字起こし'
+      && j.querySelector('.audio-card-original').src.startsWith('blob:');`),
+    '取込直後のカードは音声と文字起こしボタンだけを表示する');
+  await run(`document.querySelector('.job .workspace-open-btn').click()`);
+  await waitFor(`!document.querySelector('.job .job-setup').classList.contains('hidden')`,
+    '文字起こしワークスペースが開く');
+  check(await run(`const j=document.querySelector('.job');
     return j.querySelector('.audio-panel-label').textContent.trim() === '音声'
-      && j.querySelector('.job-setup').firstElementChild.classList.contains('audio-panel')
+      && j.querySelector('.job-setup').classList.contains('workspace-modal')
+      && j.querySelector('.workspace-card').contains(j.querySelector('.setup-flow'))
+      && j.querySelector('.workspace-content').contains(j.querySelector('.scenario-stage'))
       && j.querySelector('.denoise-row .plabel').textContent.trim() === 'ノイズの低減'
       && j.querySelector('.scenario-stage h3').textContent.includes('音声に合う設定')
       && j.querySelector('[data-scenario="normal"]')
       && !j.querySelector('[data-scenario="auto"]')
       && j.querySelector('[data-scenario="custom"]')
       && j.querySelector('.vad-details summary').textContent.includes('さらに精度を調整');`),
-    'ファイル名直下から音声・工程・シチュエーション設定・詳しい設定の順に表示される');
+    '作業ウィンドウ内に音声・工程・シチュエーション設定・詳しい設定をまとめて表示する');
   check(await run(`const j=document.querySelector('.job');
     return j.querySelector('[data-setup-step="1"]').classList.contains('is-current')
       && !j.querySelector('.scenario-card.is-active')
@@ -188,14 +199,27 @@ async function main() {
       && !j.querySelector('.trial-segments').classList.contains('hidden');`),
     '通常結果では発話の拾い方を主操作から調整でき、文字起こし修正はその他の操作から選べる');
   await run(`document.querySelector('.job .trial-adjust-btn').click()`);
+  await waitFor(`document.querySelector('.job .trial-scenario-select option[value="custom:short-replies"]')`,
+    '調整画面のシチュエーション一覧に保存済みプリセットが読み込まれる');
   check(await run(`const j=document.querySelector('.job'); const modal=j.querySelector('.trial-modal');
     return !modal.classList.contains('hidden')
       && modal.classList.contains('is-adjusting')
       && modal.querySelector('.modal-head h2').textContent === '発話の拾い方などを調整'
       && j.querySelector('.trial-adjust-settings-host').contains(j.querySelector('.vad-body'))
       && j.querySelector('.trial-adjust-audio-host').contains(j.querySelector('.trial-range-preview'))
-      && j.querySelector('.trial-adjust-range').textContent.includes('00:00');`),
-    'テスト結果の文脈を保ったまま、同じモーダル内の調整画面へ移る');
+      && j.querySelector('.trial-adjust-range').textContent.includes('00:00')
+      && j.querySelector('.trial-scenario-select').value === 'builtin:interview'
+      && j.querySelectorAll('.trial-scenario-select optgroup').length === 2
+      && j.querySelector('.trial-scenario-select option[value="__create__"]');`),
+    'テスト結果の文脈を保ったまま、同じ作業ウィンドウ内の調整画面へ移る');
+  await run(`const j=document.querySelector('.job');
+    const scenario=j.querySelector('.trial-scenario-select');
+    scenario.value='builtin:lecture'; scenario.dispatchEvent(new Event('change'));`);
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.trial-scenario-select').value === 'builtin:lecture'
+      && j.querySelector('[data-scenario="lecture"]').classList.contains('is-active')
+      && j.querySelector('.vad-max').value === '8';`),
+    '調整画面のプルダウンから組み込みシチュエーションを適用する');
   await run(`const j=document.querySelector('.job');
     const max=j.querySelector('.vad-max'); max.value='7'; max.dispatchEvent(new Event('input'));
     j.querySelector('.denoise-seg [data-value="0.8"]').click();
@@ -204,6 +228,8 @@ async function main() {
     return !j.querySelector('.trial-modal').classList.contains('is-adjusting')
       && j.querySelector('.trial-modal .modal-head h2').textContent === '仕上がりをテスト'
       && j.querySelector('.vad-max').value === '3'
+      && j.querySelector('[data-scenario="interview"]').classList.contains('is-active')
+      && j.querySelector('.trial-scenario-select').value === 'builtin:interview'
       && j.querySelector('.denoise-seg [data-value="0"]').classList.contains('is-active')
       && j.querySelector('.vad-details').contains(j.querySelector('.vad-body'))
       && j.querySelector('.trial-range-preview').parentElement === j.querySelector('.trial-box')
@@ -211,17 +237,55 @@ async function main() {
     'テスト結果へ戻ると調整前の設定を復元する');
   await run(`const j=document.querySelector('.job');
     j.querySelector('.trial-adjust-btn').click();
-    const max=j.querySelector('.vad-max'); max.value='8'; max.dispatchEvent(new Event('input'));
-    j.querySelector('.trial-modal').dispatchEvent(new KeyboardEvent('keydown', { key:'Escape', bubbles:true }));`);
+    const scenario=j.querySelector('.trial-scenario-select');
+    scenario.value='custom:short-replies'; scenario.dispatchEvent(new Event('change'));`);
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.trial-scenario-select').value === 'custom:short-replies'
+      && j.querySelector('[data-scenario="custom"]').classList.contains('is-active')
+      && j.querySelector('.vad-th').value === '0.65';`),
+    '調整画面のプルダウンから自作プリセットを適用する');
+  await run(`document.querySelector('.job .trial-modal')
+    .dispatchEvent(new KeyboardEvent('keydown', { key:'Escape', bubbles:true }));`);
   check(await run(`const j=document.querySelector('.job');
     return j.querySelector('.trial-modal').classList.contains('hidden')
       && !j.querySelector('.trial-modal').classList.contains('is-adjusting')
       && j.querySelector('.vad-max').value === '3'
+      && j.querySelector('[data-scenario="interview"]').classList.contains('is-active')
       && j.querySelector('.vad-details').contains(j.querySelector('.vad-body'));`),
-    '調整画面をEscapeで閉じても変更前の設定を復元する');
+    '自作プリセットを選んだ後にEscapeで閉じても変更前のシチュエーションを復元する');
   await run(`document.querySelector('.job .trial-open-btn').click()`);
   await waitFor(`!document.querySelector('.job .trial-modal').classList.contains('hidden')`,
     '調整画面を閉じた後も仕上がりテストへ戻れる');
+  await run(`const j=document.querySelector('.job');
+    j.querySelector('.trial-adjust-btn').click();
+    const max=j.querySelector('.vad-max'); max.value='4'; max.dispatchEvent(new Event('input'));
+    const scenario=j.querySelector('.trial-scenario-select');
+    scenario.value='__create__'; scenario.dispatchEvent(new Event('change'));`);
+  check(await run(`const j=document.querySelector('.job');
+    return !j.querySelector('.trial-preset-create').classList.contains('hidden')
+      && j.querySelector('.trial-scenario-select').value === 'builtin:interview';`),
+    '新規作成を選ぶと現在のシチュエーションを保ったまま名前入力を表示する');
+  await run(`const j=document.querySelector('.job');
+    j.querySelector('.trial-preset-name').value='仕上がり調整用';
+    j.querySelector('.trial-preset-create-save').click();`);
+  await waitFor(`[...document.querySelectorAll('.job .trial-scenario-select option')]
+    .some((option) => option.textContent === '仕上がり調整用')`,
+    '調整画面から新しいプリセットを保存する');
+  check(await run(`const j=document.querySelector('.job'); const select=j.querySelector('.trial-scenario-select');
+    const option=[...select.options].find((item)=>item.textContent==='仕上がり調整用');
+    window.testTrialPresetValue=option && option.value;
+    return option && select.value === option.value
+      && j.querySelector('[data-scenario="custom"]').classList.contains('is-active')
+      && j.querySelector('.vad-max').value === '4'
+      && j.querySelector('.trial-preset-create').classList.contains('hidden');`),
+    '新しいプリセットを一覧へ追加し、そのシチュエーションを選択する');
+  await run(`document.querySelector('.job .trial-adjust-back-btn').click()`);
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('[data-scenario="interview"]').classList.contains('is-active')
+      && j.querySelector('.vad-max').value === '3'
+      && [...j.querySelectorAll('.trial-scenario-select option')]
+        .some((option)=>option.value===window.testTrialPresetValue && option.textContent==='仕上がり調整用');`),
+    '結果へ戻るとシチュエーションを復元し、明示保存したプリセットは一覧へ残す');
   await run(`const j=document.querySelector('.job');
     j.querySelector('.trial-adjust-btn').click();
     const max=j.querySelector('.vad-max'); max.value='5'; max.dispatchEvent(new Event('input'));
@@ -238,12 +302,27 @@ async function main() {
   await run(`document.querySelector('.job .trial-auto-btn').click()`);
   await waitFor(`!document.querySelector('.job .auto-reference').classList.contains('hidden')`,
     '仮文字起こしが話者付きの修正行になる');
-  await run(`document.querySelector('.job .auto-edit-cancel').click()`);
+  check(await run(`const j=document.querySelector('.job'); const modal=j.querySelector('.trial-modal');
+    return modal.classList.contains('is-correcting')
+      && modal.querySelector('.modal-head h2').textContent === 'タイムラインで発話を修正'
+      && modal.querySelector('.modal-step-badge').textContent === '文字起こし修正'
+      && getComputedStyle(j.querySelector('.trial-controls')).display === 'none'
+      && getComputedStyle(j.querySelector('.trial-range-preview')).display === 'none'
+      && getComputedStyle(j.querySelector('.trial-result-head')).display === 'none'
+      && getComputedStyle(j.querySelector('.auto-reference')).display !== 'none'
+      && getComputedStyle(j.querySelector('.auto-reference-tools')).position === 'sticky'
+      && j.querySelector('.auto-edit-cancel').textContent.includes('結果に戻る');`),
+    '文字起こし修正ではテスト操作を隠し、タイムライン編集専用画面を表示する');
+  await run(`document.querySelector('.job .trial-modal')
+    .dispatchEvent(new KeyboardEvent('keydown', { key:'Escape', bubbles:true }));`);
   check(await run(`const j=document.querySelector('.job');
     return j.querySelector('.auto-reference').classList.contains('hidden')
+      && !j.querySelector('.trial-modal').classList.contains('is-correcting')
+      && j.querySelector('.trial-modal .modal-head h2').textContent === '仕上がりをテスト'
+      && getComputedStyle(j.querySelector('.trial-controls')).display !== 'none'
       && !j.querySelector('.trial-segments').classList.contains('hidden')
       && j.querySelector('[data-scenario="interview"]').classList.contains('is-active');`),
-    '修正をやめても試行結果と選択中のシチュエーションを維持する');
+    'Escapeでタイムライン編集を終了し、試行結果と選択中のシチュエーションを維持する');
   await run(`document.querySelector('.job .trial-auto-btn').click()`);
   check(await run(`const j=document.querySelector('.job');
     return j.querySelectorAll('.auto-timeline-block').length === 3
@@ -252,9 +331,12 @@ async function main() {
       && j.querySelector('.auto-timeline-toolbar').contains(j.querySelector('.auto-add-row'))
       && !j.querySelector('.auto-timeline-scroll').classList.contains('hidden')
       && !j.querySelector('.auto-block-inspector').classList.contains('hidden')
+      && j.querySelector('.auto-inspector-heading').contains(j.querySelector('.auto-inspector-actions'))
+      && !j.querySelector('.auto-inspector-kind')
+      && parseFloat(getComputedStyle(j.querySelector('.auto-insert-before')).fontSize) >= 11
       && j.querySelector('.auto-speaker-names').contains(j.querySelector('.auto-add-speaker'))
       && !j.querySelector('.auto-reference-tools .auto-add-speaker');`),
-    '修正画面に時間軸・話者レイヤー・選択発話の詳細編集を表示する');
+    '修正画面に時間軸・話者レイヤーと、見出し位置の読みやすい発話操作を表示する');
   check(await run(`const j=document.querySelector('.job');
     return j.querySelector('.auto-timeline-toolbar').contains(j.querySelector('.auto-timeline-transport'))
       && j.querySelector('.auto-timeline-play-toggle').textContent.includes('再生')
@@ -394,6 +476,8 @@ async function main() {
       && j.querySelector('.auto-correction-confirmed').textContent.includes('再び文字起こし')
       && j.querySelector('.auto-tune-overlay').classList.contains('hidden')
       && !j.querySelector('.trial-modal-card').inert
+      && !j.querySelector('.trial-modal').classList.contains('is-correcting')
+      && j.querySelector('.trial-modal .modal-head h2').textContent === '仕上がりをテスト'
       && j.querySelector('.trial-auto-btn').classList.contains('hidden')
       && !j.querySelector('.trial-complete-start-btn').classList.contains('hidden')
       && j.querySelector('.trial-use-btn').textContent === '閉じる'
@@ -543,12 +627,16 @@ async function main() {
       && j.querySelector('.start-btn').textContent.includes('テストせず');`),
     'テスト前は「仕上がりをテスト」が主操作になり、全体実行は控えめに表示される');
 
-  // 全体実行前の短区間テスト。独立モーダルを開き、既定の冒頭60秒を試す。
+  // 全体実行前の短区間テスト。同じワークスペース内で工程2へ進み、既定の冒頭60秒を試す。
   check(await run(`return document.querySelector('.job .trial-modal').classList.contains('hidden')`),
     '短区間の確認ウィンドウは初期状態では閉じている');
   await run(`document.querySelector('.job .trial-open-btn').click()`);
-  check(await run(`return !document.querySelector('.job .trial-modal').classList.contains('hidden')`),
-    '短区間の確認ボタンで独立ウィンドウが開く');
+  check(await run(`const j=document.querySelector('.job');
+    return !j.querySelector('.trial-modal').classList.contains('hidden')
+      && j.querySelector('.job-setup').classList.contains('is-trial-open')
+      && getComputedStyle(j.querySelector('.trial-modal')).position === 'static'
+      && j.querySelector('.workspace-setup-view').classList.contains('hidden');`),
+    '短区間の確認は同じ作業ウィンドウ内で工程2へ切り替わる');
   await waitFor(`document.querySelector('.job .trial-range-audio').src.startsWith('blob:')
     && document.querySelector('.job .trial-range-status').textContent.includes('00:00〜01:00')
     && document.querySelector('.job .trial-range-audio').readyState >= 1`,
@@ -609,6 +697,17 @@ async function main() {
   await run(`document.querySelector('.job .start-btn').click()`);
   check(await run(`return collectUnsavedState().activeJobCount === 1`),
     '処理開始直後は終了時に常に確認する状態になる');
+  await run(`document.querySelector('.job .workspace-close-btn').click()`);
+  check(await run(`const job=jobs.get(1); const j=job.el;
+    return job.isTranscribing && j.querySelector('.job-setup').classList.contains('hidden')
+      && j.querySelector('.progress-wrap').parentElement === j.querySelector('.card-progress-host')
+      && j.querySelector('.workspace-open-btn').textContent === '進捗を見る';`),
+    '処理中に作業ウィンドウを閉じても、カードで進捗を確認して処理を継続する');
+  await run(`document.querySelector('.job .workspace-open-btn').click()`);
+  check(await run(`const j=document.querySelector('.job');
+    return !j.querySelector('.job-setup').classList.contains('hidden')
+      && j.querySelector('.progress-wrap').parentElement === j.querySelector('.workspace-progress-host');`),
+    'カードの進捗ボタンから工程3の作業ウィンドウへ戻れる');
   await waitFor(`document.querySelector('.job .progress-stage').textContent.includes('開始待ち')`,
     'キューの待機順が表示される');
   check(await run(`const j=document.querySelector('.job');
@@ -665,6 +764,20 @@ async function main() {
     '文字起こし後に結果欄が表示される');
   check(await run(`const s=collectUnsavedState(); return s.activeJobCount === 0 && s.resultCount === 1;`),
     '文字起こし完了後は未保存の結果として通知する');
+  check(await run(`const j=document.querySelector('.job');
+    return !j.querySelector('.job-setup').classList.contains('hidden')
+      && !j.querySelector('.workspace-complete-view').classList.contains('hidden')
+      && [...j.querySelectorAll('[data-setup-step]')].every((step)=>step.classList.contains('is-complete'))
+      && j.querySelector('.workspace-complete-meta').textContent.includes('4 区間');`),
+    '工程3完了後も作業ウィンドウを保ち、完了内容を確認できる');
+  await run(`document.querySelector('.job .workspace-result-btn').click()`);
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.job-setup').classList.contains('hidden')
+      && !j.querySelector('.job-result').classList.contains('hidden')
+      && j.querySelector('.save-default-btn').textContent === '保存'
+      && j.querySelector('.export-menu summary').textContent.includes('エクスポート')
+      && j.querySelector('.redo-btn');`),
+    '完了カードに保存・エクスポート・再文字起こしの操作を表示する');
   check(await run(`const j=document.querySelector('.job');
     return j.querySelectorAll('.job-result .segments .seg-play').length === 4
       && j.querySelectorAll('.segments .locked-correction-badge').length === 3
@@ -749,11 +862,19 @@ async function main() {
   check(stopped.paused && stopped.btn === '▶', 'もう一度押すと停止して ▶ に戻る');
 
   // 「設定を変えてやり直す」→ 再実行後も再生が生きているか
-  // （resetResultUi の Blob URL 破棄・再生成の経路を通す）
+  // 新しい結果が成功するまでは前回結果を保持し、完了時に差し替える。
   await run(`document.querySelector('.job .redo-btn').click()`);
-  await waitFor(`!document.querySelector('.job .job-setup').classList.contains('hidden')`, 'やり直しで設定画面に戻る');
+  await waitFor(`!document.querySelector('.job .job-setup').classList.contains('hidden')`, 'やり直しで作業ウィンドウに戻る');
+  const beforeRedoRevision = await run(`return jobs.get(1).resultRevision`);
   await run(`document.querySelector('.job .start-btn').click()`);
-  await waitFor(`document.querySelectorAll('.job-result .segments .seg-play').length === 4`, '再実行の結果が描画される');
+  check(await run(`const job=jobs.get(1); const j=job.el;
+    return job.isTranscribing && !!job.result
+      && !j.querySelector('.job-result').classList.contains('hidden')
+      && j.querySelector('.job-card-title').textContent.includes('新しい文字起こしを実行中');`),
+    '再文字起こし中も前回の結果をカードに保持する');
+  await waitFor(`jobs.get(1).resultRevision > ${beforeRedoRevision} && !jobs.get(1).isTranscribing`,
+    '再実行の新しい結果が確定する');
+  await run(`document.querySelector('.job .workspace-result-btn').click()`);
   await sleep(800);
   await run(`document.querySelectorAll('.job-result .segments .seg-play')[0].click()`);
   await sleep(800);
@@ -774,6 +895,7 @@ async function main() {
   // 構造化エラーが利用者向け説明と再試行導線へ変換されるか
   await run(`document.querySelector('#pick-btn').click()`);
   await waitFor(`document.querySelectorAll('.job').length === 2`, 'エラー表示検証用のジョブが作られる');
+  await run(`document.querySelector('.job .workspace-open-btn').click()`);
   await run(`document.querySelector('.job [data-scenario="interview"]').click()`);
   await run(`document.querySelector('.job .start-btn').click()`);
   await waitFor(`!document.querySelector('.job .job-error').classList.contains('hidden')`,
@@ -783,8 +905,14 @@ async function main() {
       && j.querySelector('.job-error-title').textContent.includes('空き容量')
       && j.querySelector('.job-error-technical').textContent.includes('NO_DISK_SPACE')
       && !j.querySelector('.retry-btn').classList.contains('hidden')
-      && !j.querySelector('.job-setup').classList.contains('hidden');`),
-    '失敗工程・技術情報・再試行ボタンを示し、設定画面へ戻る');
+      && !j.querySelector('.job-setup').classList.contains('hidden')
+      && j.querySelector('.job-error').parentElement === j.querySelector('.workspace-error-host');`),
+    '失敗工程・技術情報・再試行ボタンを作業ウィンドウに示す');
+  await run(`document.querySelector('.job .workspace-close-btn').click()`);
+  check(await run(`const j=document.querySelector('.job');
+    return j.querySelector('.job-setup').classList.contains('hidden')
+      && j.querySelector('.job-error').parentElement === j.querySelector('.card-error-host');`),
+    '失敗後に作業ウィンドウを閉じてもカードから再開できる');
 
   // リアルタイム録音は文字起こし結果とは別に、WAV保存の成否を追跡する。
   await run(`addRealtimeResultJob({

@@ -1,12 +1,15 @@
 <!DOCTYPE html>
 <html lang="ja">
+
 <head>
   <meta charset="UTF-8" />
   <!-- media-src: app-media はクリップ再生用、blob は結果プレイヤー（IPC で読んで Blob 化）用 -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' app-media: blob:; connect-src 'self' blob:;" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' app-media: blob:; connect-src 'self' blob:;" />
   <title>モコシ</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
+
 <body>
   <header>
     <div class="header-main">
@@ -26,7 +29,9 @@
       <span id="model-progress-text"></span>
     </div>
     <button id="download-btn">モデルをダウンロード</button>
-    <div class="progress hidden" id="model-progress"><div class="bar"></div></div>
+    <div class="progress hidden" id="model-progress">
+      <div class="bar"></div>
+    </div>
   </section>
 
   <!-- アップデート通知バナー（起動時に更新が見つかった時だけ表示） -->
@@ -37,7 +42,9 @@
     <button id="update-download-btn">ダウンロード</button>
     <button id="update-install-btn" class="hidden">再起動して更新</button>
     <button id="update-dismiss-btn" class="ghost">後で</button>
-    <div class="progress hidden" id="update-progress"><div class="bar"></div></div>
+    <div class="progress hidden" id="update-progress">
+      <div class="bar"></div>
+    </div>
   </section>
 
   <!-- 入力モード選択（ローカルファイル / リアルタイム） -->
@@ -71,7 +78,9 @@
       <div class="rt-monitor">
         <span class="rt-rec-dot"></span>
         <span id="rt-elapsed">00:00</span>
-        <div class="rt-meter"><div id="rt-meter-bar" class="rt-meter-bar"></div></div>
+        <div class="rt-meter">
+          <div id="rt-meter-bar" class="rt-meter-bar"></div>
+        </div>
       </div>
       <div id="rt-live" class="rt-live"></div>
       <p class="hint">
@@ -126,21 +135,50 @@
         <span class="job-status"></span>
       </div>
 
-      <!-- 取込後の設定・プレビュー -->
-      <div class="job-setup">
-        <div class="audio-panel">
-          <span class="audio-panel-label">音声</span>
-          <audio class="audio-original" controls preload="metadata"></audio>
-          <span class="orig-status preview-status"></span>
+      <div class="job-card-summary">
+        <div class="job-card-audio-row">
+          <span class="job-card-audio-icon" aria-hidden="true">♪</span>
+          <audio class="audio-card-original" controls preload="metadata"></audio>
+          <span class="card-orig-status preview-status"></span>
         </div>
+        <div class="job-card-footer">
+          <div class="job-card-copy">
+            <strong class="job-card-title">文字起こしの準備ができました</strong>
+            <small class="job-card-note">音声を確認し、文字起こしを開始してください。</small>
+          </div>
+          <button type="button" class="workspace-open-btn">文字起こし</button>
+        </div>
+      </div>
 
-        <ol class="setup-flow" aria-label="文字起こしまでの流れ">
-          <li class="is-current" data-setup-step="1"><span class="setup-step-number">1</span><span>音声に合う設定</span></li>
-          <li data-setup-step="2"><span class="setup-step-number">2</span><span>仕上がりをテスト</span></li>
-          <li data-setup-step="3"><span class="setup-step-number">3</span><span>全体を文字起こし</span></li>
-        </ol>
+      <!-- 工程1〜3を一つの作業ウィンドウで完結させる -->
+      <div class="job-setup workspace-modal modal hidden" role="dialog" aria-modal="true"
+        aria-label="文字起こしワークスペース">
+        <div class="modal-backdrop" data-workspace-close></div>
+        <div class="workspace-card">
+          <div class="workspace-head">
+            <div class="workspace-heading">
+              <span class="workspace-kicker">文字起こしワークスペース</span>
+              <h2 class="workspace-job-name"></h2>
+              <p class="workspace-subtitle">設定から全体の文字起こしまで、この画面で進めます。</p>
+            </div>
+            <button type="button" class="modal-close workspace-close-btn" data-workspace-close aria-label="作業画面を閉じる">×</button>
+          </div>
 
-        <section class="scenario-stage" aria-label="音声に合う設定の選択">
+          <div class="workspace-audio-panel">
+            <span class="audio-panel-label">音声</span>
+            <audio class="audio-original" controls preload="metadata"></audio>
+            <span class="orig-status preview-status"></span>
+          </div>
+
+          <ol class="setup-flow" aria-label="文字起こしまでの流れ">
+            <li class="is-current" data-setup-step="1"><span class="setup-step-number">1</span><span>音声に合う設定</span></li>
+            <li data-setup-step="2"><span class="setup-step-number">2</span><span>仕上がりをテスト</span></li>
+            <li data-setup-step="3"><span class="setup-step-number">3</span><span>全体を文字起こし</span></li>
+          </ol>
+
+          <div class="workspace-content">
+            <div class="workspace-setup-view">
+              <section class="scenario-stage" aria-label="音声に合う設定の選択">
           <div class="setup-stage-head">
             <span class="stage-number">1</span>
             <div>
@@ -153,16 +191,20 @@
             <div class="setting-choice-group">
               <span class="setting-choice-label">シチュエーションから選ぶ</span>
               <div class="vad-seg scenario-grid" role="radiogroup" aria-label="音声のシチュエーション">
-                <button type="button" class="seg-opt scenario-card" data-scenario="interview" data-preset="interview" role="radio" aria-checked="false">
+                <button type="button" class="seg-opt scenario-card" data-scenario="interview" data-preset="interview"
+                  role="radio" aria-checked="false">
                   <strong>インタビュー</strong><small>質問と回答が中心</small>
                 </button>
-                <button type="button" class="seg-opt scenario-card" data-scenario="meeting" data-preset="conversation" role="radio" aria-checked="false">
+                <button type="button" class="seg-opt scenario-card" data-scenario="meeting" data-preset="conversation"
+                  role="radio" aria-checked="false">
                   <strong>会議</strong><small>複数人が交代で話す</small>
                 </button>
-                <button type="button" class="seg-opt scenario-card" data-scenario="phone" data-preset="conversation" role="radio" aria-checked="false">
+                <button type="button" class="seg-opt scenario-card" data-scenario="phone" data-preset="conversation"
+                  role="radio" aria-checked="false">
                   <strong>電話・通話</strong><small>2人の短い応答が多い</small>
                 </button>
-                <button type="button" class="seg-opt scenario-card" data-scenario="lecture" data-preset="lecture" role="radio" aria-checked="false">
+                <button type="button" class="seg-opt scenario-card" data-scenario="lecture" data-preset="lecture"
+                  role="radio" aria-checked="false">
                   <strong>講演・一人語り</strong><small>一人がまとまって話す</small>
                 </button>
               </div>
@@ -170,10 +212,12 @@
             <div class="setting-choice-group setting-choice-other">
               <span class="setting-choice-label">その他</span>
               <div class="vad-seg other-setting-grid" role="radiogroup" aria-label="その他の認識設定">
-                <button type="button" class="seg-opt scenario-card" data-scenario="normal" data-preset="standard" role="radio" aria-checked="false">
+                <button type="button" class="seg-opt scenario-card" data-scenario="normal" data-preset="standard"
+                  role="radio" aria-checked="false">
                   <strong>通常</strong><small>迷ったとき・場面が混ざる音声</small>
                 </button>
-                <button type="button" class="seg-opt scenario-card custom-scenario-card" data-scenario="custom" role="radio" aria-checked="false">
+                <button type="button" class="seg-opt scenario-card custom-scenario-card" data-scenario="custom"
+                  role="radio" aria-checked="false">
                   <strong>カスタム</strong><small>保存した設定を使う</small>
                 </button>
               </div>
@@ -288,8 +332,9 @@
             <button class="back-btn ghost hidden">やめて前の結果に戻る</button>
           </div>
         </div>
+            </div>
 
-        <div class="trial-modal modal hidden" role="dialog" aria-modal="true" aria-label="仕上がりをテスト">
+        <div class="trial-modal modal hidden" role="region" aria-label="仕上がりをテスト">
           <div class="modal-backdrop" data-trial-close></div>
           <div class="modal-card trial-modal-card">
             <div class="modal-head">
@@ -298,14 +343,15 @@
                 <h2>仕上がりをテスト</h2>
                 <p>音声の一部を、全体と同じ設定で文字起こしします。</p>
               </div>
-              <button type="button" class="modal-close" data-trial-close aria-label="閉じる">×</button>
+              <button type="button" class="trial-back-btn" data-trial-close>← 設定に戻る</button>
             </div>
             <div class="modal-body">
               <div class="trial-box">
                 <div class="trial-controls">
                   <label>
                     開始位置
-                    <input class="trial-start" type="text" inputmode="numeric" value="00:00" aria-label="試し文字起こしの開始位置" />
+                    <input class="trial-start" type="text" inputmode="numeric" value="00:00"
+                      aria-label="試し文字起こしの開始位置" />
                   </label>
                   <label>
                     長さ
@@ -330,7 +376,9 @@
                     <span class="trial-progress-label">開始を待っています…</span>
                     <span class="trial-progress-count"></span>
                   </div>
-                  <div class="progress"><div class="bar is-indeterminate"></div></div>
+                  <div class="progress">
+                    <div class="bar is-indeterminate"></div>
+                  </div>
                   <div class="trial-progress-foot">
                     <span class="trial-elapsed">経過 00:00</span>
                     <button type="button" class="trial-cancel">中止</button>
@@ -372,8 +420,10 @@
                       <button type="button" class="auto-add-row">＋ 欠落発話を追加</button>
                       <span class="auto-timeline-help">ブロックを移動、左右端をドラッグして区間を調整</span>
                     </div>
-                    <p class="auto-timeline-shortcuts">Space: 再生/一時停止　←/→: 1秒移動　Shift＋←/→: 5秒移動　Home: 先頭　S: 停止　J/K/L: 戻る/一時停止/進む</p>
-                    <div class="auto-timeline-scroll" tabindex="0" aria-label="発話修正タイムライン" aria-keyshortcuts="ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight Home J K L">
+                    <p class="auto-timeline-shortcuts">Space: 再生/一時停止　←/→: 1秒移動　Shift＋←/→: 5秒移動　Home: 先頭　S: 停止　J/K/L:
+                      戻る/一時停止/進む</p>
+                    <div class="auto-timeline-scroll" tabindex="0" aria-label="発話修正タイムライン"
+                      aria-keyshortcuts="ArrowLeft ArrowRight Shift+ArrowLeft Shift+ArrowRight Home J K L">
                       <div class="auto-timeline-content">
                         <canvas class="auto-timeline-waveform" aria-hidden="true"></canvas>
                         <div class="auto-timeline-ruler" aria-hidden="true"></div>
@@ -383,9 +433,13 @@
                     </div>
                     <section class="auto-block-inspector hidden" aria-label="選択した発話の編集">
                       <div class="auto-inspector-head">
-                        <div>
+                        <div class="auto-inspector-heading">
                           <strong class="auto-inspector-title">発話を編集</strong>
-                          <span class="auto-inspector-kind"></span>
+                          <div class="auto-inspector-actions">
+                            <button type="button" class="auto-insert-before">この前に追加</button>
+                            <button type="button" class="auto-insert-after">この後に追加</button>
+                            <button type="button" class="auto-row-remove">この発話を削除</button>
+                          </div>
                         </div>
                         <button type="button" class="auto-inspector-play">▶ この区間を再生</button>
                       </div>
@@ -393,7 +447,8 @@
                         <label>話者<select class="auto-inspector-speaker"></select></label>
                         <label>開始（秒）<input class="auto-inspector-start" type="number" min="0" step="0.05" /></label>
                         <label>終了（秒）<input class="auto-inspector-end" type="number" min="0" step="0.05" /></label>
-                        <label class="auto-confirm-label"><input class="auto-inspector-confirmed" type="checkbox" /> 確定（再文字起こしでも保持）</label>
+                        <label class="auto-confirm-label"><input class="auto-inspector-confirmed" type="checkbox" />
+                          確定（再文字起こしでも保持）</label>
                       </div>
                       <label class="auto-inspector-text-label">正しい文章
                         <textarea class="auto-inspector-text" rows="3" placeholder="この発話の正しい内容"></textarea>
@@ -406,15 +461,10 @@
                         </div>
                         <div class="auto-candidate-list"></div>
                       </div>
-                      <div class="auto-inspector-actions">
-                        <button type="button" class="auto-insert-before">この前に追加</button>
-                        <button type="button" class="auto-insert-after">この後に追加</button>
-                        <button type="button" class="auto-row-remove">この発話を削除</button>
-                      </div>
                     </section>
                     <div class="auto-reference-tools">
                       <span class="auto-reference-error" role="alert"></span>
-                      <button type="button" class="auto-edit-cancel">修正をやめる</button>
+                      <button type="button" class="auto-edit-cancel">修正をやめて結果に戻る</button>
                       <button type="button" class="auto-tune-btn">確定した発話で精度を上げる</button>
                     </div>
                   </section>
@@ -452,6 +502,25 @@
                     </div>
                     <div class="trial-adjust-audio-host"></div>
                   </div>
+                  <div class="trial-adjust-scenario">
+                    <label>
+                      シチュエーション
+                      <select class="trial-scenario-select" aria-label="調整に使うシチュエーション"></select>
+                    </label>
+                    <span class="trial-scenario-summary"></span>
+                    <div class="trial-preset-create hidden">
+                      <label>
+                        新しいプリセット名
+                        <input type="text" class="trial-preset-name" maxlength="40" placeholder="例: 少人数の定例会議" />
+                      </label>
+                      <span>現在の「発話の拾い方」設定を保存します。</span>
+                      <div class="trial-preset-create-actions">
+                        <button type="button" class="trial-preset-create-cancel">キャンセル</button>
+                        <button type="button" class="trial-preset-create-save">現在の設定を保存</button>
+                        <span class="trial-preset-create-status" role="status"></span>
+                      </div>
+                    </div>
+                  </div>
                   <div class="trial-adjust-guide">
                     <strong>気になる点に関係する項目</strong>
                     <div class="trial-adjust-guide-grid">
@@ -462,7 +531,7 @@
                   </div>
                   <div class="trial-adjust-settings-host"></div>
                   <div class="trial-adjust-actions">
-                    <span>再テストを開始するまで、変更は確定されません。</span>
+                    <span>テスト結果へ反映されるのは再テスト後です。保存したプリセットは一覧に残ります。</span>
                     <button type="button" class="trial-adjust-back-btn">テスト結果に戻る</button>
                     <button type="button" class="trial-adjust-retest-btn">この設定でもう一度テスト</button>
                   </div>
@@ -481,7 +550,9 @@
                   <span class="auto-tune-overlay-label">認識設定の調整を準備中…</span>
                   <span class="auto-tune-overlay-count"></span>
                 </div>
-                <div class="progress"><div class="bar is-indeterminate"></div></div>
+                <div class="progress">
+                  <div class="bar is-indeterminate"></div>
+                </div>
                 <span class="auto-tune-overlay-elapsed">経過 00:00</span>
               </div>
               <details class="auto-tune-overlay-details">
@@ -503,9 +574,26 @@
             </div>
           </div>
         </div>
+
+            <div class="workspace-progress-host"></div>
+            <div class="workspace-error-host"></div>
+            <section class="workspace-complete-view hidden" aria-live="polite">
+              <div class="workspace-complete-icon" aria-hidden="true">✓</div>
+              <span class="workspace-complete-kicker">工程 3 / 3</span>
+              <h3>文字起こしが完了しました</h3>
+              <p class="workspace-complete-meta"></p>
+              <p>結果は音声カードに保持されています。保存、エクスポート、話者タグ付けなどを続けられます。</p>
+              <div class="workspace-complete-actions">
+                <button type="button" class="workspace-result-btn">カードで結果を見る</button>
+                <button type="button" class="workspace-redo-btn ghost">設定を変えて再文字起こし</button>
+              </div>
+            </section>
+          </div>
+        </div>
       </div>
 
-      <div class="progress-wrap hidden">
+      <div class="card-progress-host">
+        <div class="progress-wrap hidden">
         <div class="progress-top">
           <span class="progress-health">
             <span class="health-dot"></span>
@@ -514,7 +602,9 @@
           <span class="progress-count"></span>
         </div>
         <div class="progress-stage" role="status" aria-live="polite" aria-atomic="true">認識エンジンを準備中…</div>
-        <div class="progress" role="progressbar" aria-label="文字起こし進捗" aria-valuemin="0" aria-valuemax="100"><div class="bar is-indeterminate"></div></div>
+        <div class="progress" role="progressbar" aria-label="文字起こし進捗" aria-valuemin="0" aria-valuemax="100">
+          <div class="bar is-indeterminate"></div>
+        </div>
         <div class="progress-footer">
           <span class="eta">残り時間を計算中</span>
           <span class="elapsed">経過 00:00</span>
@@ -534,8 +624,10 @@
           <summary>処理の詳細</summary>
           <ol class="progress-steps"></ol>
         </details>
+        </div>
       </div>
-      <div class="job-error hidden" role="alert">
+      <div class="card-error-host">
+        <div class="job-error hidden" role="alert">
         <strong class="job-error-title"></strong>
         <p class="job-error-message"></p>
         <div class="job-error-actions">
@@ -545,6 +637,7 @@
           <summary>技術情報</summary>
           <pre class="job-error-technical"></pre>
         </details>
+        </div>
       </div>
       <div class="job-result hidden">
         <div class="result-audio-row">
@@ -554,21 +647,30 @@
         </div>
         <div class="toolbar">
           <span class="meta"></span>
+          <span class="result-save-state">未保存</span>
           <span class="spacer"></span>
           <button class="save-audio-btn hidden" title="録音した音声を WAV ファイルとして保存します（アプリ終了時に一時録音は削除されます）">録音を保存</button>
           <button class="tag-btn">話者でタグ付け</button>
           <label class="merge-toggle hidden" title="保存・コピー時に、連続する同じ話者の発言を1つにまとめます">
             <input type="checkbox" class="merge-spk" /> 同じ話者をまとめる
           </label>
-          <button data-fmt="txt">TXT</button>
-          <button data-fmt="srt">SRT</button>
-          <button data-fmt="vtt">VTT</button>
-          <button data-fmt="json">JSON</button>
+          <button class="save-default-btn" data-fmt="txt" title="文字起こし結果をTXTファイルとして保存します">保存</button>
+          <details class="export-menu">
+            <summary>エクスポート</summary>
+            <div class="export-menu-popover">
+              <button data-fmt="txt">TXT</button>
+              <button data-fmt="srt">SRT</button>
+              <button data-fmt="vtt">VTT</button>
+              <button data-fmt="json">JSON</button>
+            </div>
+          </details>
           <button class="copy-btn">コピー</button>
         </div>
         <div class="embed-progress hidden">
           <span class="embed-label">声紋を解析中…</span>
-          <div class="progress"><div class="bar"></div></div>
+          <div class="progress">
+            <div class="bar"></div>
+          </div>
           <span class="embed-eta"></span>
         </div>
         <div class="diar-edit hidden">
@@ -629,20 +731,36 @@
       <div class="modal-body">
         <div class="about-main">
           <p class="about-app"><strong>モコシ</strong><span id="about-version" class="about-ver"></span></p>
-          <p class="about-desc">ReazonSpeech（k2）を sherpa-onnx で動かす、完全ローカル・オフラインの日本語文字起こしアプリ。本体コードは Apache-2.0 で提供されます。</p>
-          <p class="about-repo"><button class="lic-btn about-repo-btn" data-url="https://github.com/shaunkotani/reazon-speech-guiapp">モコシのGitHubリポジトリを開く ↗</button></p>
+          <p class="about-desc">ReazonSpeech（k2）を sherpa-onnx で動かす、完全ローカル・オフラインの日本語文字起こしアプリ。本体コードは Apache-2.0 で提供されます。
+          </p>
+          <p class="about-repo"><button class="lic-btn about-repo-btn"
+              data-url="https://github.com/shaunkotani/reazon-speech-guiapp">モコシのGitHubリポジトリを開く ↗</button></p>
           <p class="about-privacy">🔒 音声データ・文字起こし結果を外部へ送信しません。通信が発生するのはモデルの初回ダウンロード時のみです。</p>
 
           <h3>オープンソース ライセンス</h3>
           <ul class="oss-list">
-            <li><span class="oss-name">本アプリ本体</span><span class="oss-lic">Apache-2.0</span><span class="oss-acts"><button class="lic-btn" data-license="apache-2.0">全文</button></span></li>
-            <li><span class="oss-name">Electron / Chromium / Node.js</span><span class="oss-lic">MIT ほか</span><span class="oss-acts"><button class="lic-btn" data-chromium>Chromium一覧</button></span></li>
-            <li><span class="oss-name">FFmpeg（音声デコード）</span><span class="oss-lic">LGPL v3</span><span class="oss-acts"><button class="lic-btn" data-license="lgpl-3.0">LGPL</button><button class="lic-btn" data-license="gpl-3.0">GPL</button><button class="lic-btn" data-url="https://github.com/FFmpeg/FFmpeg">ソース</button></span></li>
-            <li><span class="oss-name">sherpa-onnx</span><span class="oss-lic">Apache-2.0</span><span class="oss-acts"><button class="lic-btn" data-license="apache-2.0">全文</button><button class="lic-btn" data-url="https://github.com/k2-fsa/sherpa-onnx">配布元</button></span></li>
-            <li><span class="oss-name">ReazonSpeech k2-v2（認識モデル）</span><span class="oss-lic">Apache-2.0</span><span class="oss-acts"><button class="lic-btn" data-url="https://huggingface.co/reazon-research/reazonspeech-k2-v2">配布元</button></span></li>
-            <li><span class="oss-name">Silero VAD（発話検出）</span><span class="oss-lic">MIT</span><span class="oss-acts"><button class="lic-btn" data-license="mit">全文</button></span></li>
-            <li><span class="oss-name">GTCRN（ノイズ低減モデル）</span><span class="oss-lic">上流準拠</span><span class="oss-acts"><button class="lic-btn" data-url="https://github.com/Xiaobin-Rong/gtcrn">配布元</button></span></li>
-            <li><span class="oss-name">WeSpeaker ResNet34（話者埋め込み）</span><span class="oss-lic">上流準拠</span><span class="oss-acts"><button class="lic-btn" data-url="https://github.com/wenet-e2e/wespeaker">配布元</button></span></li>
+            <li><span class="oss-name">本アプリ本体</span><span class="oss-lic">Apache-2.0</span><span
+                class="oss-acts"><button class="lic-btn" data-license="apache-2.0">全文</button></span></li>
+            <li><span class="oss-name">Electron / Chromium / Node.js</span><span class="oss-lic">MIT ほか</span><span
+                class="oss-acts"><button class="lic-btn" data-chromium>Chromium一覧</button></span></li>
+            <li><span class="oss-name">FFmpeg（音声デコード）</span><span class="oss-lic">LGPL v3</span><span
+                class="oss-acts"><button class="lic-btn" data-license="lgpl-3.0">LGPL</button><button class="lic-btn"
+                  data-license="gpl-3.0">GPL</button><button class="lic-btn"
+                  data-url="https://github.com/FFmpeg/FFmpeg">ソース</button></span></li>
+            <li><span class="oss-name">sherpa-onnx</span><span class="oss-lic">Apache-2.0</span><span
+                class="oss-acts"><button class="lic-btn" data-license="apache-2.0">全文</button><button class="lic-btn"
+                  data-url="https://github.com/k2-fsa/sherpa-onnx">配布元</button></span></li>
+            <li><span class="oss-name">ReazonSpeech k2-v2（認識モデル）</span><span class="oss-lic">Apache-2.0</span><span
+                class="oss-acts"><button class="lic-btn"
+                  data-url="https://huggingface.co/reazon-research/reazonspeech-k2-v2">配布元</button></span></li>
+            <li><span class="oss-name">Silero VAD（発話検出）</span><span class="oss-lic">MIT</span><span
+                class="oss-acts"><button class="lic-btn" data-license="mit">全文</button></span></li>
+            <li><span class="oss-name">GTCRN（ノイズ低減モデル）</span><span class="oss-lic">上流準拠</span><span
+                class="oss-acts"><button class="lic-btn"
+                  data-url="https://github.com/Xiaobin-Rong/gtcrn">配布元</button></span></li>
+            <li><span class="oss-name">WeSpeaker ResNet34（話者埋め込み）</span><span class="oss-lic">上流準拠</span><span
+                class="oss-acts"><button class="lic-btn"
+                  data-url="https://github.com/wenet-e2e/wespeaker">配布元</button></span></li>
           </ul>
           <button class="lic-btn wide" data-license="notice">帰属表示（NOTICE）全文を表示</button>
 
@@ -674,4 +792,5 @@
   <script src="../shared/corrections.js"></script>
   <script src="renderer.js"></script>
 </body>
+
 </html>
